@@ -648,10 +648,11 @@ func (r *Renderer) Push(w Writer, d Response) error {
 		}
 	}
 	d.Tags = cloneSlice(nr.tags)
-	if d.Meta == nil {
-		d.Meta = make(map[string]interface{})
-	}
 	if nr.system.Show == SystemShowBody || nr.system.Show == SystemShowBoth {
+		// Initialize Meta map if nil to avoid panic.
+		if d.Meta == nil {
+			d.Meta = make(map[string]interface{})
+		}
 		d.Meta["system"] = map[string]interface{}{
 			"app":       nr.system.App,
 			"server":    nr.system.Server,
@@ -662,7 +663,6 @@ func (r *Renderer) Push(w Writer, d Response) error {
 			"duration":  time.Since(nr.start).String(),
 		}
 	}
-
 	data, err := nr.encoders.Encode(nr.format, d)
 	if err != nil {
 		wrapped := fmt.Errorf("encoding failed: %w", err)
