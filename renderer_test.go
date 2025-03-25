@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestLogger is a test implementation of the Logger interface
@@ -557,6 +558,159 @@ func TestContextCancellation(t *testing.T) {
 
 		if tw.Buffer.Len() != 0 {
 			t.Error("Data was written despite cancelled context")
+		}
+	})
+}
+
+func TestEncoderErrorHandling(t *testing.T) {
+
+	t.Run("XMLEncodingError", func(t *testing.T) {
+		tw := &TestWriter{Headers: make(http.Header)}
+		r := New(settings).
+			WithWriter(tw).
+			WithContentType(ContentTypeXML)
+
+		// Create a value that XML can't encode natively
+		data := struct {
+			Channel chan int `xml:"channel"`
+		}{
+			Channel: make(chan int),
+		}
+
+		err := r.Push(tw, Response{Data: []interface{}{data}})
+		if err == nil {
+			t.Fatal("Expected an encoding error")
+		}
+
+		// Check if we got an EncoderError
+		var encErr *EncoderError
+		if !errors.As(err, &encErr) {
+			t.Errorf("Expected EncoderError, got %T", err)
+		}
+
+		// Verify we got an XML error response
+		output := tw.Buffer.String()
+		if !strings.Contains(output, "<error>") {
+			t.Errorf("Expected XML error response, got %q", output)
+		}
+	})
+
+	t.Run("JSONEncodingError", func(t *testing.T) {
+		tw := &TestWriter{Headers: make(http.Header)}
+		r := New(settings).
+			WithWriter(tw).
+			WithContentType(ContentTypeJSON)
+
+		// Create a value that JSON can't encode
+		data := struct {
+			Channel chan int `json:"channel"`
+		}{
+			Channel: make(chan int),
+		}
+
+		err := r.Push(tw, Response{Data: []interface{}{data}})
+		if err == nil {
+			t.Fatal("Expected an encoding error")
+		}
+
+		// Check if we got an EncoderError
+		var encErr *EncoderError
+		if !errors.As(err, &encErr) {
+			t.Errorf("Expected EncoderError, got %T", err)
+		}
+
+		// Verify we got a JSON error response
+		var resp map[string]interface{}
+		if err := json.Unmarshal(tw.Buffer.Bytes(), &resp); err != nil {
+			t.Fatalf("Failed to unmarshal error response: %v", err)
+		}
+		if resp["error"] == nil {
+			t.Errorf("Expected error in response, got %+v", resp)
+		}
+	})
+
+	t.Run("SystemStructWithBody", func(t *testing.T) {
+		tw := &TestWriter{Headers: make(http.Header)}
+		sys := System{
+			App:      "test-app",
+			Version:  "1.0",
+			Play:     true,
+			Duration: 0, // Initialize with zero value
+		}
+		r := New(settings).
+			WithWriter(tw).
+			WithContentType(ContentTypeJSON).
+			WithSystem(SystemShowBody, sys)
+
+		// Override the start time to control duration
+		r.start = time.Now().Add(-2 * time.Second) // Fixed 2 second duration
+
+		err := r.Push(tw, Response{Status: StatusSuccessful, Message: "test"})
+		if err != nil {
+			t.Fatalf("Push failed: %v", err)
+		}
+
+		// Parse the response
+		var resp Response
+		if err := json.Unmarshal(tw.Buffer.Bytes(), &resp); err != nil {
+			t.Fatalf("Failed to unmarshal response: %v", err)
+		}
+
+		// Verify system metadata
+		if resp.Meta == nil {
+			t.Fatal("Expected meta field with system info")
+		}
+
+		system, ok := resp.Meta["system"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected system info as map, got %T", resp.Meta["system"])
+		}
+
+		// Verify fixed fields
+		if system["app"] != "test-app" || system["version"] != "1.0" || system["play"] != true {
+			t.Errorf("System info mismatch: got %+v", system)
+		}
+
+		// Verify duration is present and formatted
+		duration, ok := system["duration"].(string)
+		if !ok {
+			t.Errorf("Expected duration as string, got %T", system["duration"])
+		} else if duration != "2s" { // Should match our 2 second fixed duration
+			t.Errorf("Expected duration '2s', got %q", duration)
+		}
+	})
+
+	t.Run("SystemStructWithBoth", func(t *testing.T) {
+		tw := &TestWriter{Headers: make(http.Header)}
+		sys := System{
+			App:     "test-app",
+			Server:  "localhost",
+			Version: "2.0",
+		}
+		r := New(settings).
+			WithWriter(tw).
+			WithContentType(ContentTypeXML).
+			WithSystem(SystemShowBoth, sys)
+
+		err := r.Push(tw, Response{Status: StatusSuccessful})
+		if err != nil {
+			t.Fatalf("Push failed: %v", err)
+		}
+
+		// Verify headers
+		if tw.Headers.Get("X-test-App") != "test-app" || tw.Headers.Get("X-test-Server") != "localhost" {
+			t.Errorf("Expected system info in headers, got %+v", tw.Headers)
+		}
+
+		// Verify body contains expected system info
+		output := tw.Buffer.String()
+		if !strings.Contains(output, "<App>test-app</App>") ||
+			!strings.Contains(output, "<Server>localhost</Server>") ||
+			!strings.Contains(output, "<Version>2.0</Version>") {
+			t.Errorf("Expected system info in XML body, got %q", output)
+		}
+		if !strings.Contains(output, "<Duration>") {
+			t.Errorf("Expected duration in XML body, got %q", output)
 		}
 	})
 }

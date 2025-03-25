@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"image"
@@ -67,13 +68,38 @@ const (
 
 // System holds system metadata and display preferences.
 type System struct {
-	App      string
-	Server   string
-	Version  string
-	Build    string
-	Play     bool
-	Show     SystemShow // Where to show system info (default: None)
-	Duration time.Duration
+	App      string        `json:"app" xml:"App"`
+	Server   string        `json:"server,omitempty" xml:"Server,omitempty"`
+	Version  string        `json:"version,omitempty" xml:"Version,omitempty"`
+	Build    string        `json:"build,omitempty" xml:"Build,omitempty"`
+	Play     bool          `json:"play,omitempty" xml:"Play,omitempty"`
+	Show     SystemShow    `json:"-" xml:"-"`
+	Duration time.Duration `json:"duration" xml:"Duration"`
+}
+
+// MarshalJSON provides a custom JSON encoding for System.
+func (s System) MarshalJSON() ([]byte, error) {
+	type Alias System // Prevent recursion
+	return json.Marshal(&struct {
+		Duration string `json:"duration"`
+		*Alias
+	}{
+		Duration: s.Duration.String(),
+		Alias:    (*Alias)(&s),
+	})
+}
+
+// MarshalXML provides a custom XML encoding for System.
+func (s System) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	type Alias System
+	aux := &struct {
+		Duration string `xml:"Duration"`
+		*Alias
+	}{
+		Duration: s.Duration.String(),
+		Alias:    (*Alias)(&s),
+	}
+	return e.EncodeElement(aux, start)
 }
 
 // Setting configures the renderer.
@@ -128,6 +154,26 @@ type Response struct {
 	Meta    map[string]interface{} `json:"meta,omitempty" xml:"meta,omitempty" msgpack:"meta"`
 	Errors  ErrorList              `json:"errors,omitempty" xml:"errors,omitempty" msgpack:"errors"`
 }
+
+// MarshalXML customizes XML marshaling to handle Meta.
+//func (r Response) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+//	type Alias Response
+//	aux := struct {
+//		Alias
+//		Meta string `xml:"meta,omitempty"`
+//	}{
+//		Alias: Alias(r),
+//	}
+//	if r.Meta != nil {
+//		// Serialize Meta as a JSON string for simplicity
+//		if data, err := json.Marshal(r.Meta); err == nil {
+//			aux.Meta = string(data)
+//		} else {
+//			return fmt.Errorf("failed to marshal Meta for XML: %w", err)
+//		}
+//	}
+//	return e.EncodeElement(aux, start)
+//}
 
 // ErrorList is a custom type for a list of errors that implements JSON marshalling.
 type ErrorList []error
@@ -361,6 +407,9 @@ func (r *Renderer) WithHeader(key, value string) *Renderer {
 // WithMeta adds metadata to the renderer.
 func (r *Renderer) WithMeta(key string, value interface{}) *Renderer {
 	nr := r.clone()
+	if nr.meta == nil {
+		nr.meta = make(map[string]interface{})
+	}
 	nr.meta[key] = value
 	return nr
 }
@@ -496,9 +545,12 @@ func (r *Renderer) triggerCallbacks(id, status, msg string, err error) {
 // Push sends a structured Response using the current renderer configuration.
 func (r *Renderer) Push(w Writer, d Response) error {
 	nr := r.clone()
-	nr.start = time.Now()
+	// Only set start time if not already set (allows tests to preset it)
+	if nr.start.IsZero() {
+		nr.start = time.Now()
+	}
 
-	// Check context cancellation first
+	// Check context cancellation first.
 	if nr.ctx != nil {
 		select {
 		case <-nr.ctx.Done():
@@ -526,7 +578,7 @@ func (r *Renderer) Push(w Writer, d Response) error {
 		d.Title = "error"
 	}
 
-	// Set default status codes if not already defined
+	// Set default status codes if not already defined.
 	if nr.code == 0 {
 		switch d.Status {
 		case StatusSuccessful:
@@ -542,25 +594,48 @@ func (r *Renderer) Push(w Writer, d Response) error {
 
 	d.Tags = cloneSlice(nr.tags)
 
-	// If system display is enabled, include system info in meta
+	// If system display is enabled, include system info in meta.
 	if nr.system.Show == SystemShowBody || nr.system.Show == SystemShowBoth {
 		if d.Meta == nil {
 			d.Meta = make(map[string]interface{})
 		}
-		d.Meta["system"] = map[string]interface{}{
-			"app":       nr.system.App,
-			"server":    nr.system.Server,
-			"version":   nr.system.Version,
-			"build":     nr.system.Build,
-			"play":      nr.system.Play,
-			"timestamp": time.Now().Unix(),
-			"duration":  time.Since(nr.start).String(),
-		}
+		sysCopy := nr.system
+		sysCopy.Duration = time.Since(nr.start).Truncate(time.Second)
+		d.Meta["system"] = sysCopy
 	}
 
-	encoded, err := nr.encoders.Encode(nr.contentType, d)
+	// Use the fallback-capable encoder.
+	encoded, err := nr.encoders.EncodeWithFallback(nr.contentType, d)
 	if err != nil {
-		wrapped := fmt.Errorf("encoding failed: %w", err)
+		// We expect an EncoderError if encoding failed.
+		if encErr, ok := err.(*EncoderError); ok {
+			encoded = encErr.FallbackData
+			nr.triggerCallbacks(nr.id, StatusError, encErr.Error(), encErr)
+			// Adjust the status code.
+			if nr.code == http.StatusOK || nr.code == http.StatusAccepted {
+				nr.code = http.StatusInternalServerError
+			}
+			// Write fallback error response.
+			if hdrErr := nr.applyCommonHeaders(w, nr.contentType); hdrErr != nil {
+				nr.triggerCallbacks(nr.id, StatusFatal, hdrErr.Error(), hdrErr)
+				if nr.finalizer != nil {
+					nr.finalizer(w, hdrErr)
+				}
+				return hdrErr
+			}
+			if _, werr := w.Write(encoded); werr != nil {
+				wrapped := fmt.Errorf("write failed: %w", werr)
+				nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+				if nr.finalizer != nil {
+					nr.finalizer(w, wrapped)
+				}
+				return wrapped
+			}
+			// Return the encoding error so callers (and tests) see it.
+			return encErr
+		}
+		// Unexpected error.
+		wrapped := fmt.Errorf("unexpected encoding error: %w", err)
 		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {
 			nr.finalizer(w, wrapped)
@@ -577,8 +652,7 @@ func (r *Renderer) Push(w Writer, d Response) error {
 		return wrapped
 	}
 
-	_, err = w.Write(encoded)
-	if err != nil {
+	if _, err := w.Write(encoded); err != nil {
 		wrapped := fmt.Errorf("write failed: %w", err)
 		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {

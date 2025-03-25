@@ -93,6 +93,89 @@ func (er *EncoderRegistry) Encode(contentType string, v interface{}) ([]byte, er
 	return e.Marshal(v)
 }
 
+// EncoderRegistry's EncodeWithFallback
+func (er *EncoderRegistry) EncodeWithFallback(contentType string, v interface{}) ([]byte, error) {
+	e, ok := er.Get(contentType)
+	if !ok {
+		return nil, fmt.Errorf("no encoder for content type %s", contentType)
+	}
+
+	data, err := e.Marshal(v)
+	if err == nil {
+		return data, nil
+	}
+
+	encErr := &EncoderError{
+		OriginalError: err,
+		ContentType:   contentType,
+	}
+	encErr.FallbackData = encErr.GenerateFallback()
+	return encErr.FallbackData, encErr
+}
+
+// EncoderError represents an encoding failure with fallback data
+type EncoderError struct {
+	OriginalError error
+	ContentType   string
+	FallbackData  []byte
+}
+
+func (e *EncoderError) Error() string {
+	return fmt.Sprintf("encoding failed for %s: %v", e.ContentType, e.OriginalError)
+}
+
+func (e *EncoderError) Unwrap() error {
+	return e.OriginalError
+}
+
+// JSONErrorResponse generates a JSON-formatted error response
+func (e *EncoderError) JSONErrorResponse() []byte {
+	resp := map[string]string{
+		"error":   "encoding failed",
+		"message": e.OriginalError.Error(),
+	}
+	data, _ := json.Marshal(resp) // Safe to ignore error here as fallback
+	return data
+}
+
+// XMLErrorResponse generates an XML-formatted error response
+func (e *EncoderError) XMLErrorResponse() []byte {
+	type XMLError struct {
+		XMLName xml.Name `xml:"error"`
+		Message string   `xml:"message"`
+	}
+	resp := XMLError{Message: e.OriginalError.Error()}
+	data, _ := xml.Marshal(resp) // Safe to ignore error here as fallback
+	return data
+}
+
+// TextErrorResponse generates a text-formatted error response
+func (e *EncoderError) TextErrorResponse() []byte {
+	return []byte(fmt.Sprintf("encoding failed: %s", e.OriginalError.Error()))
+}
+
+// GenerateFallback generates the appropriate fallback based on content type
+func (e *EncoderError) GenerateFallback() []byte {
+	switch e.ContentType {
+	case ContentTypeJSON:
+		return e.JSONErrorResponse()
+	case ContentTypeXML:
+		return e.XMLErrorResponse()
+	case ContentTypeText:
+		return e.TextErrorResponse()
+	case ContentTypeMsgPack:
+		// Minimal MsgPack fallback
+		resp := map[string]string{
+			"error":   "encoding failed",
+			"message": e.OriginalError.Error(),
+		}
+		data, _ := msgpack.Marshal(resp)
+		return data
+	default:
+		return []byte(e.OriginalError.Error())
+	}
+}
+
 // -----------------------------------------------------------------------------
 // SSE Event Type
 // -----------------------------------------------------------------------------
@@ -125,9 +208,151 @@ func (e *MsgPackEncoder) ContentType() string { return ContentTypeMsgPack }
 
 type XMLEncoder struct{}
 
-func (e *XMLEncoder) Marshal(v interface{}) ([]byte, error)      { return xml.Marshal(v) }
-func (e *XMLEncoder) Unmarshal(data []byte, v interface{}) error { return xml.Unmarshal(data, v) }
-func (e *XMLEncoder) ContentType() string                        { return ContentTypeXML }
+func (e *XMLEncoder) Marshal(v interface{}) ([]byte, error) {
+	// Handle Response type specially
+	if resp, ok := v.(Response); ok {
+		return e.marshalResponse(resp)
+	}
+
+	// Handle maps - convert to a more XML-friendly structure
+	if m, ok := v.(map[string]interface{}); ok {
+		return e.mapToXMLBytes(m)
+	}
+
+	return xml.Marshal(v)
+}
+
+func (e *XMLEncoder) mapToXMLBytes(m map[string]interface{}) ([]byte, error) {
+	type Entry struct {
+		XMLName xml.Name
+		Value   interface{} `xml:",innerxml"`
+	}
+
+	var entries []Entry
+	for k, v := range m {
+		entries = append(entries, Entry{
+			XMLName: xml.Name{Local: k},
+			Value:   v,
+		})
+	}
+
+	return xml.Marshal(entries)
+}
+
+func (e *XMLEncoder) marshalResponse(resp Response) ([]byte, error) {
+	type xmlMeta struct {
+		XMLName xml.Name
+		Value   interface{} `xml:",innerxml"`
+	}
+
+	// MetaWrapper nests the system info separately under <meta>
+	type MetaWrapper struct {
+		System    interface{} `xml:"system,omitempty"`
+		OtherMeta []xmlMeta   `xml:",any"`
+	}
+
+	type Alias struct {
+		XMLName xml.Name      `xml:"response"` // root element
+		Status  string        `xml:"status"`
+		Title   string        `xml:"title,omitempty"`
+		Message string        `xml:"message,omitempty"`
+		Tags    []string      `xml:"tags,omitempty"`
+		Info    interface{}   `xml:"info,omitempty"`
+		Data    []interface{} `xml:"data,omitempty"`
+		Meta    *MetaWrapper  `xml:"meta,omitempty"`
+		Errors  ErrorList     `xml:"errors,omitempty"`
+	}
+
+	// Build the MetaWrapper if there is meta information
+	var metaWrapper *MetaWrapper
+	if resp.Meta != nil && len(resp.Meta) > 0 {
+		mw := &MetaWrapper{}
+
+		// Handle System struct specially in meta
+		if sys, ok := resp.Meta["system"].(System); ok {
+			type XMLSystem struct {
+				App      string `xml:"App"`
+				Server   string `xml:"Server,omitempty"`
+				Version  string `xml:"Version,omitempty"`
+				Build    string `xml:"Build,omitempty"`
+				Play     bool   `xml:"Play,omitempty"`
+				Duration string `xml:"Duration"`
+			}
+			mw.System = XMLSystem{
+				App:      sys.App,
+				Server:   sys.Server,
+				Version:  sys.Version,
+				Build:    sys.Build,
+				Play:     sys.Play,
+				Duration: sys.Duration.String(), // Explicit string conversion
+			}
+			delete(resp.Meta, "system")
+		}
+
+		// Process any additional meta fields
+		for key, value := range resp.Meta {
+			if nestedMap, ok := value.(map[string]interface{}); ok {
+				nested := e.mapToXML(nestedMap)
+				mw.OtherMeta = append(mw.OtherMeta, xmlMeta{
+					XMLName: xml.Name{Local: key},
+					Value:   nested,
+				})
+			} else {
+				mw.OtherMeta = append(mw.OtherMeta, xmlMeta{
+					XMLName: xml.Name{Local: key},
+					Value:   value,
+				})
+			}
+		}
+		metaWrapper = mw
+	}
+
+	aux := Alias{
+		Status:  resp.Status,
+		Title:   resp.Title,
+		Message: resp.Message,
+		Tags:    resp.Tags,
+		Info:    resp.Info,
+		Data:    resp.Data,
+		Meta:    metaWrapper,
+		Errors:  resp.Errors,
+	}
+
+	// Add XML header and proper indentation
+	data, err := xml.MarshalIndent(aux, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+
+	// Proper XML document with header
+	return []byte(xml.Header + string(data)), nil
+}
+
+// mapToXML converts a map[string]interface{} to an XML-compatible structure
+func (e *XMLEncoder) mapToXML(m map[string]interface{}) interface{} {
+	type xmlElement struct {
+		XMLName xml.Name
+		Value   interface{} `xml:",innerxml"`
+	}
+
+	elements := make([]xmlElement, 0, len(m))
+	for key, value := range m {
+		if nestedMap, ok := value.(map[string]interface{}); ok {
+			elements = append(elements, xmlElement{XMLName: xml.Name{Local: key}, Value: e.mapToXML(nestedMap)})
+		} else {
+			elements = append(elements, xmlElement{XMLName: xml.Name{Local: key}, Value: value})
+		}
+	}
+	return elements
+}
+
+func (e *XMLEncoder) Unmarshal(data []byte, v interface{}) error {
+	return xml.Unmarshal(data, v)
+}
+
+func (e *XMLEncoder) ContentType() string {
+	return ContentTypeXML
+}
 
 type TextEncoder struct{}
 
