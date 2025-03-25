@@ -277,8 +277,8 @@ type Renderer struct {
 	system       System             // System metadata configuration
 }
 
-// New creates a new Renderer with the provided settings and default content type.
-func New(s Setting) *Renderer {
+// NewRenderer creates a new Renderer with the provided settings and default content type.
+func NewRenderer(s Setting) *Renderer {
 	if s.ContentType == "" {
 		s.ContentType = ContentTypeJSON // Fallback to JSON
 	}

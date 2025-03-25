@@ -60,34 +60,34 @@ var byteBufferPool = sync.Pool{
 }
 
 // -----------------------------------------------------------------------------
-// Puller: One-shot operations for complete data decoding.
+// Reader: One-shot operations for complete data decoding.
 // -----------------------------------------------------------------------------
 
-// Puller wraps an io.Reader (and optionally an io.Closer) and supports context cancellation.
-type Puller struct {
+// Reader wraps an io.Reader (and optionally an io.Closer) and supports context cancellation.
+type Reader struct {
 	r      io.Reader
 	closer io.Closer
 	ctx    context.Context
 }
 
-// NewReader creates a new Puller instance.
-func NewReader(r io.Reader) *Puller {
+// NewReader creates a new Reader instance.
+func NewReader(r io.Reader) *Reader {
 	var c io.Closer
 	if rc, ok := r.(io.Closer); ok {
 		c = rc
 	}
-	return &Puller{r: r, closer: c}
+	return &Reader{r: r, closer: c}
 }
 
-// NewPullerWithContext creates a new Puller with cancellation support.
-func NewPullerWithContext(ctx context.Context, r io.Reader) *Puller {
+// NewPullerWithContext creates a new Reader with cancellation support.
+func NewPullerWithContext(ctx context.Context, r io.Reader) *Reader {
 	rd := NewReader(r)
 	rd.ctx = ctx
 	return rd
 }
 
 // PULL reads all data from the underlying reader.
-func (r *Puller) PULL() ([]byte, error) {
+func (r *Reader) PULL() ([]byte, error) {
 	if err := r.checkContext(); err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func (r *Puller) PULL() ([]byte, error) {
 }
 
 // MsgPack decodes MessagePack data into the provided pointer.
-func (r *Puller) MsgPack(v interface{}) error {
+func (r *Reader) MsgPack(v interface{}) error {
 	if err := validatePointer(v); err != nil {
 		return err
 	}
@@ -128,7 +128,7 @@ func (r *Puller) MsgPack(v interface{}) error {
 }
 
 // JSON decodes JSON data into the provided pointer.
-func (r *Puller) JSON(v interface{}) error {
+func (r *Reader) JSON(v interface{}) error {
 	if err := validatePointer(v); err != nil {
 		return err
 	}
@@ -148,7 +148,7 @@ func (r *Puller) JSON(v interface{}) error {
 }
 
 // XML decodes XML data into the provided pointer.
-func (r *Puller) XML(v interface{}) error {
+func (r *Reader) XML(v interface{}) error {
 	if err := validatePointer(v); err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func (r *Puller) XML(v interface{}) error {
 }
 
 // B64 decodes Base64 data into the provided byte slice pointer.
-func (r *Puller) B64(v interface{}) error {
+func (r *Reader) B64(v interface{}) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Slice {
 		return ErrInvalidByteSlicePointer
@@ -189,7 +189,7 @@ func (r *Puller) B64(v interface{}) error {
 }
 
 // Byte reads raw bytes into the provided byte slice pointer.
-func (r *Puller) Byte(v interface{}) error {
+func (r *Reader) Byte(v interface{}) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Slice {
 		return ErrInvalidByteSlicePointer
@@ -204,7 +204,7 @@ func (r *Puller) Byte(v interface{}) error {
 }
 
 // Text reads data as a string into the provided string pointer.
-func (r *Puller) Text(v *string) error {
+func (r *Reader) Text(v *string) error {
 	if v == nil {
 		return ErrInvalidStringPointer
 	}
@@ -218,7 +218,7 @@ func (r *Puller) Text(v *string) error {
 }
 
 // checkContext verifies whether the context has been canceled.
-func (r *Puller) checkContext() error {
+func (r *Reader) checkContext() error {
 	if r.ctx != nil {
 		select {
 		case <-r.ctx.Done():

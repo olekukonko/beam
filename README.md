@@ -1,246 +1,469 @@
 # Beam - Flexible Response Rendering for Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/yourusername/beam.svg)](https://pkg.go.dev/github.com/yourusername/beam)
-[![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/beam)](https://goreportcard.com/report/github.com/yourusername/beam)
-[![Tests](https://github.com/yourusername/beam/actions/workflows/go.yml/badge.svg)](https://github.com/yourusername/beam/actions/workflows/go.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/aibox/beam.svg)](https://pkg.go.dev/github.com/aibox/beam)
+[![Go Report Card](https://goreportcard.com/badge/github.com/aibox/beam)](https://goreportcard.com/report/github.com/aibox/beam)
+[![Tests](https://github.com/aibox/beam/actions/workflows/go.yml/badge.svg)](https://github.com/aibox/beam/actions/workflows/go.yml)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Beam is a powerful Go package designed to simplify and standardize API response generation with support for multiple formats, streaming, and comprehensive error handling.
+Beam is a versatile Go package designed to streamline API response generation with a focus on flexibility, performance, and consistency. Whether you need to render JSON, stream large datasets, or handle errors gracefully, Beam provides a robust toolkit for building modern, scalable web services.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Core Concepts](#core-concepts)
+  - [Response Structure](#response-structure)
+  - [Supported Formats](#supported-formats)
+- [Advanced Usage](#advanced-usage)
+  - [Custom Encoders](#custom-encoders)
+  - [Error Handling](#error-handling)
+  - [Streaming Large Data](#streaming-large-data)
+  - [Context Cancellation](#context-cancellation)
+- [Configuration Options](#configuration-options)
+  - [Renderer Settings](#renderer-settings)
+  - [System Metadata](#system-metadata)
+- [Best Practices and Performance Considerations](#best-practices-and-performance-considerations)
+- [Examples](#examples)
+  - [REST API Handler](#rest-api-handler)
+  - [Streaming CSV Export](#streaming-csv-export)
+  - [Sample Full Application](#sample-full-application)
+- [Puller Package](#puller-package)
+  - [Reader](#reader)
+  - [Streamer](#streamer)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
 
 ## Features
 
-- **Multi-format support**: JSON, MsgPack, XML, Text, Binary, Form URL Encoded
-- **Streaming capabilities**: Efficient handling of large payloads
-- **Context-aware**: Full support for context cancellation
-- **Error handling**: Built-in error classification and filtering
-- **Customizable**: Extensible encoder system and callback hooks
-- **Standardized responses**: Consistent response structure across your API
+- **Multi-format Rendering**: Supports JSON, XML, MsgPack, text, binary, and more out of the box.
+- **Streaming Support**: Efficiently streams large payloads to reduce memory usage.
+- **Context Awareness**: Integrates with Go’s `context` package for cancellation and timeouts.
+- **Robust Error Handling**: Classifies errors, supports custom filters, and triggers callbacks.
+- **Extensibility**: Add custom encoders to support additional formats like CSV.
+- **Consistent Responses**: Enforces a standardized response structure for all endpoints.
+
+---
 
 ## Installation
 
+Install Beam using:
+
 ```bash
-go get github.com/yourusername/beam
+go get github.com/aibox/beam
 ```
+
+**Note**: Some features (e.g., image rendering) require additional standard library packages like `image/png`
+
+---
 
 ## Quick Start
 
-### Basic Usage
+Below is a simple HTTP server that returns a JSON response using Beam:
 
 ```go
 package main
 
 import (
 	"net/http"
-	
-	"github.com/yourusername/beam"
+	"github.com/aibox/beam"
 )
 
 func main() {
-	// Create a new renderer with default settings
-	renderer := beam.New(beam.Setting{
-		Name:   "myapp",
-		Format: beam.FormatJSON,
+	// Initialize a renderer with default JSON output.
+	renderer := beam.NewRenderer(beam.Setting{
+		Name:          "myapp",
+		ContentType:   beam.ContentTypeJSON,
+		EnableHeaders: true,
 	})
 
+	// Define a handler using Beam's Handler helper.
 	http.Handle("/data", renderer.Handler(func(r *beam.Renderer) error {
-		data := map[string]interface{}{
-			"id":   123,
-			"name": "Example Data",
-		}
-		return r.Info("Data retrieved successfully", data)
+		data := map[string]string{"id": "123", "name": "Example"}
+		return r.Info("Data retrieved", data)
 	}))
 
+	// Start the HTTP server.
 	http.ListenAndServe(":8080", nil)
 }
 ```
+
+When you visit `http://localhost:8080/data`, you will receive a JSON response similar to:
+
+```json
+{
+  "status": "+ok",
+  "message": "Data retrieved",
+  "info": {"id": "123", "name": "Example"}
+}
+```
+
+---
 
 ## Core Concepts
 
 ### Response Structure
 
-Beam uses a standardized response format:
+Beam uses a consistent response structure for all outputs:
 
 ```go
 type Response struct {
-	Status  string                 `json:"status"`
-	Title   string                 `json:"title,omitempty"`
-	Message string                 `json:"message,omitempty"`
-	Tags    []string               `json:"tags,omitempty"`
-	Info    interface{}            `json:"info,omitempty"`
-	Data    []interface{}          `json:"data,omitempty"`
-	Meta    map[string]interface{} `json:"meta,omitempty"`
-	Errors  []string               `json:"errors,omitempty"`
+	Status  string                 `json:"status" xml:"status" msgpack:"status"`
+	Title   string                 `json:"title,omitempty" xml:"title,omitempty" msgpack:"title"`
+	Message string                 `json:"message,omitempty" xml:"message,omitempty" msgpack:"message"`
+	Tags    []string               `json:"tags,omitempty" xml:"tags,omitempty" msgpack:"tags"`
+	Info    interface{}            `json:"info,omitempty" xml:"info,omitempty" msgpack:"info"`
+	Data    []interface{}          `json:"data,omitempty" xml:"data,omitempty" msgpack:"data"`
+	Meta    map[string]interface{} `json:"meta,omitempty" xml:"meta,omitempty" msgpack:"meta"`
+	Errors  ErrorList              `json:"errors,omitempty" xml:"errors,omitempty" msgpack:"errors"`
+}
+```
+
+**Example Output (JSON):**
+
+```json
+{
+  "status": "+ok",
+  "message": "Operation completed",
+  "info": {"user": "Alice"},
+  "meta": {"system": {"app": "MyApp", "version": "1.0.0"}}
 }
 ```
 
 ### Supported Formats
 
-| Format | Content-Type | Description |
-|--------|--------------|-------------|
-| JSON | `application/json` | Default format, human-readable |
-| MsgPack | `application/msgpack` | Binary format for efficiency |
-| XML | `application/xml` | XML formatted responses |
-| Text | `text/plain` | Simple text responses |
-| Binary | `application/octet-stream` | Raw binary data |
-| Form URL Encoded | `application/x-www-form-urlencoded` | URL-encoded form data |
+Beam supports these content types:
+
+| Format               | Content-Type                                    | Description                     |
+|----------------------|-------------------------------------------------|---------------------------------|
+| **JSON**             | `application/json`                              | Default, human-readable         |
+| **MsgPack**          | `application/msgpack`                           | Compact binary format           |
+| **XML**              | `application/xml`                               | Structured XML output           |
+| **Text**             | `text/plain`                                    | Plain text responses            |
+| **Binary**           | `application/octet-stream`                      | Raw binary data                 |
+| **Form URL Encoded** | `application/x-www-form-urlencoded`             | URL-encoded key-value pairs     |
+| **Images**           | `image/png`, `image/jpeg`, etc.                 | Encoded image data              |
+
+---
 
 ## Advanced Usage
 
 ### Custom Encoders
 
+You can extend Beam by registering custom encoders. For example, a custom CSV encoder:
+
 ```go
-// Create a custom encoder for CSV format
 type CSVEncoder struct{}
 
 func (e *CSVEncoder) Marshal(v interface{}) ([]byte, error) {
-	// Implement CSV marshaling logic
+	// Simplified CSV logic
+	return []byte(fmt.Sprintf("%v", v)), nil
 }
 
 func (e *CSVEncoder) Unmarshal(data []byte, v interface{}) error {
-	// Implement CSV unmarshaling logic
+	return fmt.Errorf("unmarshaling not implemented")
 }
 
-// Register the custom encoder
-renderer := beam.New(beam.Setting{Name: "myapp"})
-renderer.UseEncoder(beam.FormatText, &CSVEncoder{})
+func (e *CSVEncoder) ContentType() string { return "text/csv" }
+
+// Register the custom CSV encoder.
+renderer := beam.NewRenderer(beam.Setting{Name: "myapp"}).UseEncoder(&CSVEncoder{})
 ```
 
 ### Error Handling
 
-```go
-renderer.Error("Failed to process request", 
-	errors.New("validation failed"),
-	errors.New("database timeout"))
+Handle errors uniformly using Beam's built-in methods:
 
-// With custom error filtering
+```go
+renderer.Error("Request failed: %s", errors.New("invalid input"))
+
+// Custom error filtering:
 renderer.FilterError(func(err error) bool {
-	// Ignore specific errors
-	return !errors.Is(err, sql.ErrNoRows)
+	return errors.Is(err, sql.ErrNoRows) // Ignore "no rows" errors
 })
 ```
 
 ### Streaming Large Data
 
-```go
-// Stream binary data in chunks
-err := renderer.StreamBytes(writer, func(chunk []byte) error {
-	// Process each chunk
-	return nil
-}, 64*1024) // 64KB buffer size
+Stream data incrementally to optimize memory usage:
 
-// Stream JSON array elements
-err := renderer.StreamJSON(func(enc *json.Encoder) error {
-	for _, item := range largeDataset {
-		if err := enc.Encode(item); err != nil {
-			return err
-		}
+```go
+err := renderer.WithContentType(beam.ContentTypeText).Stream(func(r *beam.Renderer) (interface{}, error) {
+	// Return a data chunk.
+	chunk := "data chunk\n"
+	if done {
+		return nil, io.EOF // End stream when done.
 	}
-	return nil
+	return chunk, nil
 })
+if err != nil {
+	renderer.Fatal(err)
+}
 ```
 
 ### Context Cancellation
+
+Beam integrates with Go’s `context` package to support timeouts and cancellation:
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 defer cancel()
 
-renderer.WithContext(ctx).Push(writer, beam.Response{
-	Status:  beam.StatusSuccessful,
-	Message: "Data processed",
-})
+renderer.WithContext(ctx).Info("Processing...", nil)
 ```
+
+---
 
 ## Configuration Options
 
 ### Renderer Settings
 
+Customize your renderer with various settings:
+
 ```go
 type Setting struct {
-	Name          string            // Application name for headers
-	Format        Format            // Default output format
-	EnableHeaders bool              // Enable sending headers
+	Name          string            // Application name (used in headers)
+	ContentType   string            // Default output content type (e.g., beam.ContentTypeJSON)
+	EnableHeaders bool              // Enable or disable header output
 	Presets       map[string]Preset // Custom presets for content types
 }
 ```
 
-### System Metadata
+Example:
 
 ```go
-renderer.WithSystem(beam.SystemShowBoth, beam.System{
-	App:      "MyApp",
-	Server:   "production",
-	Version:  "1.0.0",
-	Build:    "2023-01-01",
-	Play:     false,
-	Duration: 0,
+renderer := beam.NewRenderer(beam.Setting{
+	Name:        "myapp",
+	ContentType: beam.ContentTypeJSON,
 })
 ```
 
-## Best Practices
+### System Metadata
 
-1. **Consistent Responses**: Use the standardized response format across your entire API
-2. **Error Classification**: Use the built-in error statuses (`StatusError`, `StatusFatal`)
-3. **Streaming**: For payloads >1MB, use streaming methods
-4. **Context Propagation**: Always pass context through for cancellation support
-5. **Custom Encoders**: Register custom encoders at application startup
+Embed system metadata into responses or headers:
 
-## Performance Considerations
+```go
+renderer.WithSystem(beam.SystemShowBoth, beam.System{
+	App:     "MyApp",
+	Version: "1.0.0",
+	Build:   "2023-01-01",
+	Play:    false,
+})
+```
 
-- For small payloads (<1KB), the standard methods are most efficient
-- For medium payloads (1KB-1MB), consider using `Raw()` with pre-encoded data
-- For large payloads (>1MB), always use streaming methods
-- Reuse renderer instances when possible to benefit from pooled buffers
+---
+
+## Best Practices and Performance Considerations
+
+- **Consistency**: Always use the standardized `Response` structure for uniform outputs.
+- **Error Clarity**: Utilize status constants like `StatusError` and `StatusFatal` for clear error states.
+- **Streaming**: For payloads larger than 1MB, leverage the `Stream` method to minimize memory usage.
+- **Context Propagation**: Pass contexts to support cancellation and timeouts.
+- **Logging**: Configure a logger using `SetLogger` for production-level debugging.
+- **Reuse**: Benefit from Beam's internal buffer pooling for high-performance responses.
+
+---
 
 ## Examples
 
 ### REST API Handler
 
+A simple REST API endpoint using Beam:
+
 ```go
 func GetUserHandler(w http.ResponseWriter, r *http.Request) {
-	renderer := beam.New(beam.Setting{Name: "userapi"}).WithWriter(w)
-	
-	user, err := db.GetUser(r.URL.Query().Get("id"))
-	if err != nil {
-		renderer.Error("Failed to get user", err)
+	renderer := beam.NewRenderer(beam.Setting{Name: "api"}).WithWriter(w)
+	user := map[string]string{"id": "1", "name": "Alice"}
+	if err := dbError(); err != nil {
+		renderer.Error("Database error: %s", err)
 		return
 	}
-	
-	renderer.Info("User retrieved", user)
+	renderer.Info("User found", user)
 }
 ```
 
 ### Streaming CSV Export
 
+Export large datasets as CSV:
+
 ```go
-func ExportCSVHandler(w http.ResponseWriter, r *http.Request) {
-	renderer := beam.New(beam.Setting{
-		Name:   "export",
-		Format: beam.FormatText,
-	}).WithWriter(w)
-	
-	renderer.WithHeader("Content-Type", "text/csv")
-	renderer.WithHeader("Content-Disposition", "attachment; filename=export.csv")
-	
-	csvWriter := csv.NewWriter(w)
-	defer csvWriter.Flush()
-	
-	err := renderer.StreamBytesToCallback(func(chunk []byte) error {
-		return csvWriter.Write(strings.Split(string(chunk), ","))
-	}, 32*1024)
-	
+func ExportCSV(w http.ResponseWriter, r *http.Request) {
+	renderer := beam.NewRenderer(beam.Setting{
+		Name:        "export",
+		ContentType: "text/csv",
+	}).WithWriter(w).WithHeader("Content-Disposition", "attachment; filename=data.csv")
+
+	err := renderer.Stream(func(r *beam.Renderer) (interface{}, error) {
+		// Return CSV data as a string.
+		return "id,name\n1,Alice\n", io.EOF
+	})
 	if err != nil {
 		renderer.Fatal(err)
 	}
 }
 ```
 
-## Contributing
+### Sample Full Application
 
-Contributions are welcome! Please follow these guidelines:
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for your changes
-4. Submit a pull request
+The following complete sample application integrates Beam with the Chi router and demonstrates multiple endpoints:
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+	"image"
+	"image/color"
+	"net/http"
+
+	"github.com/aibox/beam"
+	"github.com/go-chi/chi/v5"
+)
+
+// SimpleLogger implements the Logger interface.
+type SimpleLogger struct{}
+
+func (l *SimpleLogger) Log(err error) bool {
+	fmt.Println("LOG:", err.Error())
+	return true
+}
+
+func main() {
+	// Initialize the Beam renderer with custom settings.
+	renderer := beam.NewRenderer(beam.Setting{
+		Name:          "beam",
+		EnableHeaders: true,
+	}).SetLogger(&SimpleLogger{}).
+		WithCallback(func(data beam.CallbackData) {
+			if data.Status == beam.StatusSuccessful {
+				fmt.Printf("Success: %+v\n", data)
+			} else if data.IsError() {
+				fmt.Printf("Error: %+v\n", data)
+			}
+		}).WithSystem(beam.SystemShowBoth, beam.System{
+			App:     "MyApp",
+			Server:  "localhost",
+			Version: "1.0.0",
+			Build:   "20250323",
+			Play:    true,
+		})
+
+	// Create a Chi router.
+	r := chi.NewRouter()
+
+	// Define endpoints using the renderer.
+	r.Get("/hello", renderer.Handler(func(r *beam.Renderer) error {
+		return r.Info("Hello, world!", map[string]string{"greeting": "Hi!"})
+	}))
+	r.Get("/error", renderer.Handler(func(r *beam.Renderer) error {
+		return r.Error("error %s", errors.New("oops"))
+	}))
+	r.Get("/xml", renderer.Handler(func(r *beam.Renderer) error {
+		return r.WithContentType(beam.ContentTypeXML).Error("error %s", errors.New("oops"))
+	}))
+	r.Get("/meta", renderer.Handler(func(r *beam.Renderer) error {
+		return r.WithContentType(beam.ContentTypeXML).
+			WithMeta("custom", "value").
+			Info("test", nil)
+	}))
+	r.Get("/fatal", renderer.Handler(func(r *beam.Renderer) error {
+		return r.Fatal(errors.New("danger"))
+	}))
+	r.Get("/image", renderer.Handler(func(r *beam.Renderer) error {
+		return r.WithHeader("name", "sample").Image(beam.ContentTypePNG, dummyImage(300, 300))
+	}))
+
+	fmt.Println("Listening on :4040")
+	if err := http.ListenAndServe(":4040", r); err != nil {
+		fmt.Printf("Server failed: %v\n", err)
+	}
+}
+
+// dummyImage creates a simple solid blue image for demonstration.
+func dummyImage(width, height int) image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	blue := color.RGBA{0, 0, 255, 255}
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.Set(x, y, blue)
+		}
+	}
+	return img
+}
+```
+
+In this sample:
+- A custom logger is set via `SetLogger`.
+- Several endpoints demonstrate standard responses, error handling, XML output, custom metadata, fatal errors, and image rendering.
+- The `dummyImage` function (corrected from `dummayImage`) generates a simple blue image.
+
+---
+
+## Puller Package
+
+The Beam repository also includes the `puller` package, which provides tools for decoding data from an `io.Reader`. It offers both a one-shot Reader and a streaming Streamer for handling large or continuous data.
+
+### Reader
+
+The `puller.Reader` type supports reading all data and decoding it using various formats (JSON, XML, MsgPack, etc.). For example:
+
+```go
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"github.com/aibox/beam/puller"
+)
+
+func main() {
+	data := []byte(`{"name": "Alice", "age": 30}`)
+	reader := puller.NewReader(bytes.NewReader(data))
+	var result map[string]interface{}
+	if err := reader.JSON(&result); err != nil {
+		fmt.Println("Error decoding JSON:", err)
+	} else {
+		fmt.Println("Decoded JSON:", result)
+	}
+}
+```
+
+### Streamer
+
+The `puller.Streamer` type enables you to process data in chunks using a callback. For example:
+
+```go
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"github.com/aibox/beam/puller"
+)
+
+func main() {
+	// Simulate a large input stream.
+	data := bytes.Repeat([]byte("chunk data\n"), 100)
+	streamer := puller.NewStreamer(bytes.NewReader(data))
+	
+	err := streamer.Bytes(func(chunk []byte) error {
+		fmt.Print(string(chunk))
+		return nil
+	}, 1024)
+	
+	if err != nil && err != io.EOF {
+		fmt.Println("Error streaming data:", err)
+	}
+}
+```
+
+---
 
 ## License
 

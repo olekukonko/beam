@@ -65,7 +65,7 @@ var settings = Setting{Name: "test"}
 
 func TestNewRenderer(t *testing.T) {
 	t.Run("DefaultSettings", func(t *testing.T) {
-		r := New(settings)
+		r := NewRenderer(settings)
 		if r.contentType != ContentTypeJSON {
 			t.Errorf("Expected default content type %s, got %s", ContentTypeJSON, r.contentType)
 		}
@@ -75,7 +75,7 @@ func TestNewRenderer(t *testing.T) {
 	})
 
 	t.Run("CustomContentType", func(t *testing.T) {
-		r := New(settings).WithContentType(ContentTypeXML)
+		r := NewRenderer(settings).WithContentType(ContentTypeXML)
 		if r.contentType != ContentTypeXML {
 			t.Errorf("Expected content type %s, got %s", ContentTypeXML, r.contentType)
 		}
@@ -83,7 +83,7 @@ func TestNewRenderer(t *testing.T) {
 }
 
 func TestRenderer_WithMethods(t *testing.T) {
-	base := New(settings)
+	base := NewRenderer(settings)
 
 	t.Run("WithWriter", func(t *testing.T) {
 		tw := &TestWriter{}
@@ -174,7 +174,7 @@ func TestRenderer_WithMethods(t *testing.T) {
 func TestRenderer_Push(t *testing.T) {
 	t.Run("SuccessfulJSON", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(settings).WithWriter(tw)
+		r := NewRenderer(settings).WithWriter(tw)
 		resp := Response{
 			Status:  StatusSuccessful,
 			Message: "test message",
@@ -206,7 +206,7 @@ func TestRenderer_Push(t *testing.T) {
 
 	t.Run("ErrorHandling", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header), WriteError: fmt.Errorf("write error")}
-		r := New(settings).WithWriter(tw)
+		r := NewRenderer(settings).WithWriter(tw)
 		resp := Response{Status: StatusSuccessful}
 
 		err := r.Push(tw, resp)
@@ -218,7 +218,7 @@ func TestRenderer_Push(t *testing.T) {
 	t.Run("WithSystemInfo", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
 		sys := System{App: "test-app", Show: SystemShowBody}
-		r := New(settings).WithWriter(tw).WithSystem(SystemShowBody, sys)
+		r := NewRenderer(settings).WithWriter(tw).WithSystem(SystemShowBody, sys)
 		resp := Response{Status: StatusSuccessful}
 
 		err := r.Push(tw, resp)
@@ -240,7 +240,7 @@ func TestRenderer_Push(t *testing.T) {
 func TestRenderer_Raw(t *testing.T) {
 	t.Run("SuccessfulRaw", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(settings).WithWriter(tw)
+		r := NewRenderer(settings).WithWriter(tw)
 
 		err := r.Raw(map[string]string{"key": "value"})
 		if err != nil {
@@ -258,7 +258,7 @@ func TestRenderer_Raw(t *testing.T) {
 	})
 
 	t.Run("NoWriter", func(t *testing.T) {
-		r := New(settings) // No writer set
+		r := NewRenderer(settings) // No writer set
 
 		err := r.Raw("test")
 		if err == nil || !strings.Contains(err.Error(), "no writer set") {
@@ -270,7 +270,7 @@ func TestRenderer_Raw(t *testing.T) {
 func TestRenderer_Stream(t *testing.T) {
 	t.Run("SuccessfulStreamEventStream", func(t *testing.T) {
 		tfw := &TestFlusherWriter{TestWriter: TestWriter{Headers: make(http.Header)}}
-		r := New(settings).WithContentType(ContentTypeEventStream).WithWriter(tfw)
+		r := NewRenderer(settings).WithContentType(ContentTypeEventStream).WithWriter(tfw)
 
 		count := 0
 		err := r.Stream(func(r *Renderer) (interface{}, error) {
@@ -306,7 +306,7 @@ func TestRenderer_Stream(t *testing.T) {
 
 	t.Run("SuccessfulStreamJSON", func(t *testing.T) {
 		tfw := &TestFlusherWriter{TestWriter: TestWriter{Headers: make(http.Header)}}
-		r := New(settings).WithWriter(tfw)
+		r := NewRenderer(settings).WithWriter(tfw)
 
 		count := 0
 		err := r.Stream(func(r *Renderer) (interface{}, error) {
@@ -332,7 +332,7 @@ func TestRenderer_Stream(t *testing.T) {
 	})
 
 	t.Run("NoWriter", func(t *testing.T) {
-		r := New(settings).WithContentType(ContentTypeEventStream)
+		r := NewRenderer(settings).WithContentType(ContentTypeEventStream)
 		err := r.Stream(func(r *Renderer) (interface{}, error) {
 			return Event{Data: "test"}, nil
 		})
@@ -343,7 +343,7 @@ func TestRenderer_Stream(t *testing.T) {
 
 	t.Run("StreamError", func(t *testing.T) {
 		tfw := &TestFlusherWriter{TestWriter: TestWriter{Headers: make(http.Header)}}
-		r := New(settings).WithContentType(ContentTypeEventStream).WithWriter(tfw)
+		r := NewRenderer(settings).WithContentType(ContentTypeEventStream).WithWriter(tfw)
 
 		testErr := errors.New("stream error")
 		err := r.Stream(func(r *Renderer) (interface{}, error) {
@@ -358,7 +358,7 @@ func TestRenderer_Stream(t *testing.T) {
 func TestRenderer_Binary(t *testing.T) {
 	t.Run("SuccessfulBinary", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(settings).WithWriter(tw)
+		r := NewRenderer(settings).WithWriter(tw)
 		data := []byte{1, 2, 3, 4}
 
 		err := r.Binary(ContentTypeBinary, data)
@@ -380,7 +380,7 @@ func TestRenderer_Binary(t *testing.T) {
 func TestRenderer_Image(t *testing.T) {
 	t.Run("SuccessfulPNG", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(settings).WithWriter(tw)
+		r := NewRenderer(settings).WithWriter(tw)
 
 		// Create a simple 1x1 image
 		img := image.NewRGBA(image.Rect(0, 0, 1, 1))
@@ -403,7 +403,7 @@ func TestRenderer_Image(t *testing.T) {
 
 	t.Run("UnsupportedFormat", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(settings).WithWriter(tw)
+		r := NewRenderer(settings).WithWriter(tw)
 
 		img := image.NewRGBA(image.Rect(0, 0, 1, 1))
 		err := r.Image("unsupported/format", img)
@@ -415,7 +415,7 @@ func TestRenderer_Image(t *testing.T) {
 
 func TestRenderer_ConvenienceMethods(t *testing.T) {
 	tw := &TestWriter{Headers: make(http.Header)}
-	r := New(settings).WithWriter(tw)
+	r := NewRenderer(settings).WithWriter(tw)
 
 	t.Run("Error", func(t *testing.T) {
 		testErr := errors.New("test error")
@@ -459,7 +459,7 @@ func TestRenderer_ConvenienceMethods(t *testing.T) {
 
 func TestRenderer_Handler(t *testing.T) {
 	t.Run("SuccessfulHandler", func(t *testing.T) {
-		r := New(settings)
+		r := NewRenderer(settings)
 		handler := r.Handler(func(r *Renderer) error {
 			return r.Info("handler test", nil)
 		})
@@ -485,7 +485,7 @@ func TestRenderer_Handler(t *testing.T) {
 
 	t.Run("HandlerError", func(t *testing.T) {
 		testLogger := &TestLogger{}
-		r := New(settings).SetLogger(testLogger)
+		r := NewRenderer(settings).SetLogger(testLogger)
 		handler := r.Handler(func(r *Renderer) error {
 			return fmt.Errorf("handler error")
 		})
@@ -508,7 +508,7 @@ func TestRenderer_Handler(t *testing.T) {
 func TestErrorFilters(t *testing.T) {
 	t.Run("SkipError", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(settings).WithWriter(tw)
+		r := NewRenderer(settings).WithWriter(tw)
 
 		err := r.Error("test", ErrSkip)
 		if err != nil {
@@ -523,7 +523,7 @@ func TestErrorFilters(t *testing.T) {
 	t.Run("CustomFilter", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
 		customErr := errors.New("custom error")
-		r := New(settings).
+		r := NewRenderer(settings).
 			WithWriter(tw).
 			WithErrorFilters(func(err error) bool {
 				return errors.Is(err, customErr)
@@ -546,7 +546,7 @@ func TestContextCancellation(t *testing.T) {
 		cancel()
 
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(settings).
+		r := NewRenderer(settings).
 			WithWriter(tw).
 			WithIDGeneration(true).
 			WithContext(ctx)
@@ -566,7 +566,7 @@ func TestEncoderErrorHandling(t *testing.T) {
 
 	t.Run("XMLEncodingError", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(settings).
+		r := NewRenderer(settings).
 			WithWriter(tw).
 			WithContentType(ContentTypeXML)
 
@@ -597,7 +597,7 @@ func TestEncoderErrorHandling(t *testing.T) {
 
 	t.Run("JSONEncodingError", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(settings).
+		r := NewRenderer(settings).
 			WithWriter(tw).
 			WithContentType(ContentTypeJSON)
 
@@ -637,7 +637,7 @@ func TestEncoderErrorHandling(t *testing.T) {
 			Play:     true,
 			Duration: 0, // Initialize with zero value
 		}
-		r := New(settings).
+		r := NewRenderer(settings).
 			WithWriter(tw).
 			WithContentType(ContentTypeJSON).
 			WithSystem(SystemShowBody, sys)
@@ -687,7 +687,7 @@ func TestEncoderErrorHandling(t *testing.T) {
 			Server:  "localhost",
 			Version: "2.0",
 		}
-		r := New(settings).
+		r := NewRenderer(settings).
 			WithWriter(tw).
 			WithContentType(ContentTypeXML).
 			WithSystem(SystemShowBoth, sys)
