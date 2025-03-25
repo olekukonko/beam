@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -49,30 +50,39 @@ func (tw *TestWriter) WriteHeader(statusCode int) {
 	tw.StatusCode = statusCode
 }
 
+// TestFlusherWriter extends TestWriter with Flusher for streaming tests
+type TestFlusherWriter struct {
+	TestWriter
+	FlushCalled int
+}
+
+func (tfw *TestFlusherWriter) Flush() {
+	tfw.FlushCalled++
+}
+
+var settings = Setting{Name: "test"}
+
 func TestNewRenderer(t *testing.T) {
 	t.Run("DefaultSettings", func(t *testing.T) {
-		r := New(Setting{Name: "test"})
-		if r.s.Name != "test" {
-			t.Errorf("Expected name 'test', got '%s'", r.s.Name)
-		}
-		if r.format != FormatJSON {
-			t.Errorf("Expected default format JSON, got %v", r.format)
+		r := New(settings)
+		if r.contentType != ContentTypeJSON {
+			t.Errorf("Expected default content type %s, got %s", ContentTypeJSON, r.contentType)
 		}
 		if !r.s.EnableHeaders {
 			t.Error("Expected headers enabled by default")
 		}
 	})
 
-	t.Run("CustomFormat", func(t *testing.T) {
-		r := New(Setting{Format: FormatXML})
-		if r.format != FormatXML {
-			t.Errorf("Expected format XML, got %v", r.format)
+	t.Run("CustomContentType", func(t *testing.T) {
+		r := New(settings).WithContentType(ContentTypeXML)
+		if r.contentType != ContentTypeXML {
+			t.Errorf("Expected content type %s, got %s", ContentTypeXML, r.contentType)
 		}
 	})
 }
 
 func TestRenderer_WithMethods(t *testing.T) {
-	base := New(Setting{Name: "test"})
+	base := New(settings)
 
 	t.Run("WithWriter", func(t *testing.T) {
 		tw := &TestWriter{}
@@ -134,10 +144,10 @@ func TestRenderer_WithMethods(t *testing.T) {
 		}
 	})
 
-	t.Run("WithFormat", func(t *testing.T) {
-		r := base.WithFormat(FormatMsgPack)
-		if r.format != FormatMsgPack {
-			t.Error("WithFormat did not set the format")
+	t.Run("WithContentType", func(t *testing.T) {
+		r := base.WithContentType(ContentTypeMsgPack)
+		if r.contentType != ContentTypeMsgPack {
+			t.Errorf("Expected content type %s, got %s", ContentTypeMsgPack, r.contentType)
 		}
 	})
 
@@ -163,7 +173,7 @@ func TestRenderer_WithMethods(t *testing.T) {
 func TestRenderer_Push(t *testing.T) {
 	t.Run("SuccessfulJSON", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(Setting{Name: "test"}).WithWriter(tw)
+		r := New(settings).WithWriter(tw)
 		resp := Response{
 			Status:  StatusSuccessful,
 			Message: "test message",
@@ -179,8 +189,8 @@ func TestRenderer_Push(t *testing.T) {
 		}
 
 		contentType := tw.Headers.Get("Content-Type")
-		if contentType != "application/json" {
-			t.Errorf("Expected content type application/json, got %s", contentType)
+		if contentType != ContentTypeJSON {
+			t.Errorf("Expected content type %s, got %s", ContentTypeJSON, contentType)
 		}
 
 		var result Response
@@ -195,7 +205,7 @@ func TestRenderer_Push(t *testing.T) {
 
 	t.Run("ErrorHandling", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header), WriteError: fmt.Errorf("write error")}
-		r := New(Setting{Name: "test"}).WithWriter(tw)
+		r := New(settings).WithWriter(tw)
 		resp := Response{Status: StatusSuccessful}
 
 		err := r.Push(tw, resp)
@@ -207,7 +217,7 @@ func TestRenderer_Push(t *testing.T) {
 	t.Run("WithSystemInfo", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
 		sys := System{App: "test-app", Show: SystemShowBody}
-		r := New(Setting{Name: "test"}).WithWriter(tw).WithSystem(SystemShowBody, sys)
+		r := New(settings).WithWriter(tw).WithSystem(SystemShowBody, sys)
 		resp := Response{Status: StatusSuccessful}
 
 		err := r.Push(tw, resp)
@@ -229,7 +239,7 @@ func TestRenderer_Push(t *testing.T) {
 func TestRenderer_Raw(t *testing.T) {
 	t.Run("SuccessfulRaw", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(Setting{Name: "test"}).WithWriter(tw)
+		r := New(settings).WithWriter(tw)
 
 		err := r.Raw(map[string]string{"key": "value"})
 		if err != nil {
@@ -247,7 +257,7 @@ func TestRenderer_Raw(t *testing.T) {
 	})
 
 	t.Run("NoWriter", func(t *testing.T) {
-		r := New(Setting{Name: "test"}) // No writer set
+		r := New(settings) // No writer set
 
 		err := r.Raw("test")
 		if err == nil || !strings.Contains(err.Error(), "no writer set") {
@@ -256,13 +266,101 @@ func TestRenderer_Raw(t *testing.T) {
 	})
 }
 
+func TestRenderer_Stream(t *testing.T) {
+	t.Run("SuccessfulStreamEventStream", func(t *testing.T) {
+		tfw := &TestFlusherWriter{TestWriter: TestWriter{Headers: make(http.Header)}}
+		r := New(settings).WithContentType(ContentTypeEventStream).WithWriter(tfw)
+
+		count := 0
+		err := r.Stream(func(r *Renderer) (interface{}, error) {
+			if count >= 2 {
+				return nil, io.EOF
+			}
+			count++
+			return Event{ID: fmt.Sprintf("%d", count), Data: "test"}, nil
+		})
+		if err != nil {
+			t.Fatalf("Stream failed: %v", err)
+		}
+
+		if tfw.StatusCode != http.StatusOK {
+			t.Errorf("Expected status 200, got %d", tfw.StatusCode)
+		}
+
+		contentType := tfw.Headers.Get("Content-Type")
+		if contentType != ContentTypeEventStream {
+			t.Errorf("Expected content type %s, got %s", ContentTypeEventStream, contentType)
+		}
+
+		output := tfw.Buffer.String()
+		expected := "id: 1\ndata: \"test\"\n\nid: 2\ndata: \"test\"\n\n"
+		if output != expected {
+			t.Errorf("Expected output %q, got %q", expected, output)
+		}
+
+		if tfw.FlushCalled < 2 {
+			t.Errorf("Expected at least 2 flush calls, got %d", tfw.FlushCalled)
+		}
+	})
+
+	t.Run("SuccessfulStreamJSON", func(t *testing.T) {
+		tfw := &TestFlusherWriter{TestWriter: TestWriter{Headers: make(http.Header)}}
+		r := New(settings).WithWriter(tfw)
+
+		count := 0
+		err := r.Stream(func(r *Renderer) (interface{}, error) {
+			if count >= 2 {
+				return nil, io.EOF
+			}
+			count++
+			return map[string]int{"count": count}, nil
+		})
+		if err != nil {
+			t.Fatalf("Stream failed: %v", err)
+		}
+
+		output := tfw.Buffer.String()
+		expected := `{"count":1}{"count":2}`
+		if output != expected {
+			t.Errorf("Expected output %q, got %q", expected, output)
+		}
+
+		if tfw.FlushCalled < 2 {
+			t.Errorf("Expected at least 2 flush calls, got %d", tfw.FlushCalled)
+		}
+	})
+
+	t.Run("NoWriter", func(t *testing.T) {
+		r := New(settings).WithContentType(ContentTypeEventStream)
+		err := r.Stream(func(r *Renderer) (interface{}, error) {
+			return Event{Data: "test"}, nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "no writer set") {
+			t.Errorf("Expected no writer error, got %v", err)
+		}
+	})
+
+	t.Run("StreamError", func(t *testing.T) {
+		tfw := &TestFlusherWriter{TestWriter: TestWriter{Headers: make(http.Header)}}
+		r := New(settings).WithContentType(ContentTypeEventStream).WithWriter(tfw)
+
+		testErr := errors.New("stream error")
+		err := r.Stream(func(r *Renderer) (interface{}, error) {
+			return nil, testErr
+		})
+		if err == nil || !strings.Contains(err.Error(), "stream callback failed") {
+			t.Errorf("Expected stream error, got %v", err)
+		}
+	})
+}
+
 func TestRenderer_Binary(t *testing.T) {
 	t.Run("SuccessfulBinary", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(Setting{Name: "test"}).WithWriter(tw)
+		r := New(settings).WithWriter(tw)
 		data := []byte{1, 2, 3, 4}
 
-		err := r.Binary("application/octet-stream", data)
+		err := r.Binary(ContentTypeBinary, data)
 		if err != nil {
 			t.Fatalf("Binary failed: %v", err)
 		}
@@ -272,8 +370,8 @@ func TestRenderer_Binary(t *testing.T) {
 		}
 
 		contentType := tw.Headers.Get("Content-Type")
-		if contentType != "application/octet-stream" {
-			t.Errorf("Expected content type application/octet-stream, got %s", contentType)
+		if contentType != ContentTypeBinary {
+			t.Errorf("Expected content type %s, got %s", ContentTypeBinary, contentType)
 		}
 	})
 }
@@ -281,13 +379,13 @@ func TestRenderer_Binary(t *testing.T) {
 func TestRenderer_Image(t *testing.T) {
 	t.Run("SuccessfulPNG", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(Setting{Name: "test"}).WithWriter(tw)
+		r := New(settings).WithWriter(tw)
 
 		// Create a simple 1x1 image
 		img := image.NewRGBA(image.Rect(0, 0, 1, 1))
 		img.Set(0, 0, color.RGBA{255, 0, 0, 255})
 
-		err := r.Image(ImageTypePNG, img)
+		err := r.Image(ContentTypePNG, img)
 		if err != nil {
 			t.Fatalf("Image failed: %v", err)
 		}
@@ -297,14 +395,14 @@ func TestRenderer_Image(t *testing.T) {
 		}
 
 		contentType := tw.Headers.Get("Content-Type")
-		if contentType != ImageTypePNG {
-			t.Errorf("Expected content type %s, got %s", ImageTypePNG, contentType)
+		if contentType != ContentTypePNG {
+			t.Errorf("Expected content type %s, got %s", ContentTypePNG, contentType)
 		}
 	})
 
 	t.Run("UnsupportedFormat", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(Setting{Name: "test"}).WithWriter(tw)
+		r := New(settings).WithWriter(tw)
 
 		img := image.NewRGBA(image.Rect(0, 0, 1, 1))
 		err := r.Image("unsupported/format", img)
@@ -316,7 +414,7 @@ func TestRenderer_Image(t *testing.T) {
 
 func TestRenderer_ConvenienceMethods(t *testing.T) {
 	tw := &TestWriter{Headers: make(http.Header)}
-	r := New(Setting{Name: "test"}).WithWriter(tw)
+	r := New(settings).WithWriter(tw)
 
 	t.Run("Error", func(t *testing.T) {
 		testErr := errors.New("test error")
@@ -360,7 +458,7 @@ func TestRenderer_ConvenienceMethods(t *testing.T) {
 
 func TestRenderer_Handler(t *testing.T) {
 	t.Run("SuccessfulHandler", func(t *testing.T) {
-		r := New(Setting{Name: "test"})
+		r := New(settings)
 		handler := r.Handler(func(r *Renderer) error {
 			return r.Info("handler test", nil)
 		})
@@ -386,7 +484,7 @@ func TestRenderer_Handler(t *testing.T) {
 
 	t.Run("HandlerError", func(t *testing.T) {
 		testLogger := &TestLogger{}
-		r := New(Setting{Name: "test"}).SetLogger(testLogger)
+		r := New(settings).SetLogger(testLogger)
 		handler := r.Handler(func(r *Renderer) error {
 			return fmt.Errorf("handler error")
 		})
@@ -409,7 +507,7 @@ func TestRenderer_Handler(t *testing.T) {
 func TestErrorFilters(t *testing.T) {
 	t.Run("SkipError", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(Setting{Name: "test"}).WithWriter(tw)
+		r := New(settings).WithWriter(tw)
 
 		err := r.Error("test", ErrSkip)
 		if err != nil {
@@ -424,7 +522,7 @@ func TestErrorFilters(t *testing.T) {
 	t.Run("CustomFilter", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
 		customErr := errors.New("custom error")
-		r := New(Setting{Name: "test"}).
+		r := New(settings).
 			WithWriter(tw).
 			WithErrorFilters(func(err error) bool {
 				return errors.Is(err, customErr)
@@ -447,7 +545,7 @@ func TestContextCancellation(t *testing.T) {
 		cancel()
 
 		tw := &TestWriter{Headers: make(http.Header)}
-		r := New(Setting{Name: "test"}).
+		r := New(settings).
 			WithWriter(tw).
 			WithIDGeneration(true).
 			WithContext(ctx)
@@ -459,96 +557,6 @@ func TestContextCancellation(t *testing.T) {
 
 		if tw.Buffer.Len() != 0 {
 			t.Error("Data was written despite cancelled context")
-		}
-	})
-}
-
-func TestEncoderRegistry(t *testing.T) {
-	t.Run("DefaultEncoders", func(t *testing.T) {
-		er := NewEncoderRegistry()
-
-		testCases := []struct {
-			format Format
-			data   interface{}
-		}{
-			{FormatJSON, map[string]string{"key": "value"}},
-			{FormatMsgPack, map[string]string{"key": "value"}},
-			{FormatXML, struct {
-				XMLName struct{} `xml:"test"`
-				Key     string   `xml:"key"`
-			}{Key: "value"}},
-			{FormatText, "test"},
-		}
-
-		for _, tc := range testCases {
-			_, err := er.Encode(tc.format, tc.data)
-			if err != nil {
-				t.Errorf("%d encoding failed: %v", tc.format, err)
-			}
-		}
-	})
-
-	t.Run("CustomEncoder", func(t *testing.T) {
-		er := NewEncoderRegistry()
-
-		// Create a tracking encoder
-		trackingEncoder := &trackingEncoder{
-			Encoder: &JSONEncoder{},
-			called:  false,
-		}
-
-		er.Register(FormatJSON, trackingEncoder)
-
-		_, err := er.Encode(FormatJSON, map[string]string{"key": "value"})
-		if err != nil {
-			t.Errorf("Custom encoder failed: %v", err)
-		}
-
-		if !trackingEncoder.called {
-			t.Error("Custom encoder was not called")
-		}
-	})
-
-	t.Run("FallbackEncoder", func(t *testing.T) {
-		er := NewEncoderRegistry().Fallback(&JSONEncoder{})
-		_, err := er.Encode(FormatUnknown, map[string]string{"key": "value"})
-		if err != nil {
-			t.Errorf("Fallback encoding failed: %v", err)
-		}
-	})
-}
-
-func TestCallbackManager(t *testing.T) {
-	t.Run("TriggerCallbacks", func(t *testing.T) {
-		cm := NewCallbackManager()
-		called := false
-		cb := func(data CallbackData) {
-			called = true
-			if data.ID != "test-id" || data.Status != StatusError {
-				t.Errorf("Unexpected callback data: %+v", data)
-			}
-		}
-
-		cm.AddCallback(cb)
-		cm.Trigger("test-id", StatusError, "test message", nil)
-
-		if !called {
-			t.Error("Callback was not called")
-		}
-	})
-
-	t.Run("Clone", func(t *testing.T) {
-		cm := NewCallbackManager()
-		cm.AddCallback(func(data CallbackData) {})
-
-		clone := cm.Clone()
-		if len(clone.callbacks) != 1 {
-			t.Error("Clone did not copy callbacks")
-		}
-
-		cm.AddCallback(func(data CallbackData) {})
-		if len(clone.callbacks) != 1 {
-			t.Error("Clone is not independent")
 		}
 	})
 }

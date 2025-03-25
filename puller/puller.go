@@ -1,4 +1,4 @@
-package beam
+package puller
 
 import (
 	"context"
@@ -60,34 +60,34 @@ var byteBufferPool = sync.Pool{
 }
 
 // -----------------------------------------------------------------------------
-// Reader: One-shot operations for complete data decoding.
+// Puller: One-shot operations for complete data decoding.
 // -----------------------------------------------------------------------------
 
-// Reader wraps an io.Reader (and optionally an io.Closer) and supports context cancellation.
-type Reader struct {
+// Puller wraps an io.Reader (and optionally an io.Closer) and supports context cancellation.
+type Puller struct {
 	r      io.Reader
 	closer io.Closer
 	ctx    context.Context
 }
 
-// NewReader creates a new Reader instance.
-func NewReader(r io.Reader) *Reader {
+// NewReader creates a new Puller instance.
+func NewReader(r io.Reader) *Puller {
 	var c io.Closer
 	if rc, ok := r.(io.Closer); ok {
 		c = rc
 	}
-	return &Reader{r: r, closer: c}
+	return &Puller{r: r, closer: c}
 }
 
-// NewReaderWithContext creates a new Reader with cancellation support.
-func NewReaderWithContext(ctx context.Context, r io.Reader) *Reader {
+// NewPullerWithContext creates a new Puller with cancellation support.
+func NewPullerWithContext(ctx context.Context, r io.Reader) *Puller {
 	rd := NewReader(r)
 	rd.ctx = ctx
 	return rd
 }
 
 // PULL reads all data from the underlying reader.
-func (r *Reader) PULL() ([]byte, error) {
+func (r *Puller) PULL() ([]byte, error) {
 	if err := r.checkContext(); err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func (r *Reader) PULL() ([]byte, error) {
 }
 
 // MsgPack decodes MessagePack data into the provided pointer.
-func (r *Reader) MsgPack(v interface{}) error {
+func (r *Puller) MsgPack(v interface{}) error {
 	if err := validatePointer(v); err != nil {
 		return err
 	}
@@ -128,7 +128,7 @@ func (r *Reader) MsgPack(v interface{}) error {
 }
 
 // JSON decodes JSON data into the provided pointer.
-func (r *Reader) JSON(v interface{}) error {
+func (r *Puller) JSON(v interface{}) error {
 	if err := validatePointer(v); err != nil {
 		return err
 	}
@@ -148,7 +148,7 @@ func (r *Reader) JSON(v interface{}) error {
 }
 
 // XML decodes XML data into the provided pointer.
-func (r *Reader) XML(v interface{}) error {
+func (r *Puller) XML(v interface{}) error {
 	if err := validatePointer(v); err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func (r *Reader) XML(v interface{}) error {
 }
 
 // B64 decodes Base64 data into the provided byte slice pointer.
-func (r *Reader) B64(v interface{}) error {
+func (r *Puller) B64(v interface{}) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Slice {
 		return ErrInvalidByteSlicePointer
@@ -189,7 +189,7 @@ func (r *Reader) B64(v interface{}) error {
 }
 
 // Byte reads raw bytes into the provided byte slice pointer.
-func (r *Reader) Byte(v interface{}) error {
+func (r *Puller) Byte(v interface{}) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Slice {
 		return ErrInvalidByteSlicePointer
@@ -204,7 +204,7 @@ func (r *Reader) Byte(v interface{}) error {
 }
 
 // Text reads data as a string into the provided string pointer.
-func (r *Reader) Text(v *string) error {
+func (r *Puller) Text(v *string) error {
 	if v == nil {
 		return ErrInvalidStringPointer
 	}
@@ -218,158 +218,13 @@ func (r *Reader) Text(v *string) error {
 }
 
 // checkContext verifies whether the context has been canceled.
-func (r *Reader) checkContext() error {
+func (r *Puller) checkContext() error {
 	if r.ctx != nil {
 		select {
 		case <-r.ctx.Done():
 			return ErrContextCanceled
 		default:
 		}
-	}
-	return nil
-}
-
-// -----------------------------------------------------------------------------
-// Streamer: Streaming operations for processing large or continuous data.
-// -----------------------------------------------------------------------------
-
-// Streamer provides efficient streaming operations on an io.Reader.
-// If the underlying reader implements io.Closer, it will be closed after processing.
-type Streamer struct {
-	r      io.Reader
-	closer io.Closer
-	ctx    context.Context
-}
-
-// NewStreamer creates a new Streamer instance.
-func NewStreamer(r io.Reader) *Streamer {
-	var c io.Closer
-	if rc, ok := r.(io.Closer); ok {
-		c = rc
-	}
-	return &Streamer{r: r, closer: c}
-}
-
-// NewStreamerWithContext creates a new Streamer with cancellation support.
-func NewStreamerWithContext(ctx context.Context, r io.Reader) *Streamer {
-	st := NewStreamer(r)
-	st.ctx = ctx
-	return st
-}
-
-// MsgPack streams MessagePack data using the provided callback.
-// The callback is invoked repeatedly until io.EOF or an error is returned.
-func (s *Streamer) MsgPack(callback func(*msgpack.Decoder) error) error {
-	decoder := msgpack.NewDecoder(s.r)
-	defer s.close()
-
-	for {
-		if err := s.checkContext(); err != nil {
-			return err
-		}
-
-		if err := callback(decoder); err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return fmt.Errorf("MessagePack streaming error: %w", err)
-		}
-	}
-}
-
-// JSON streams JSON data using the provided callback.
-// The callback is invoked repeatedly until io.EOF or an error is returned.
-func (s *Streamer) JSON(callback func(*json.Decoder) error) error {
-	decoder := json.NewDecoder(s.r)
-	defer s.close()
-
-	for {
-		if err := s.checkContext(); err != nil {
-			return err
-		}
-
-		if err := callback(decoder); err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return fmt.Errorf("JSON streaming error: %w", err)
-		}
-	}
-}
-
-// XML streams XML data using the provided callback.
-// The callback is invoked repeatedly until io.EOF or an error is returned.
-func (s *Streamer) XML(callback func(*xml.Decoder) error) error {
-	decoder := xml.NewDecoder(s.r)
-	defer s.close()
-
-	for {
-		if err := s.checkContext(); err != nil {
-			return err
-		}
-
-		if err := callback(decoder); err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return fmt.Errorf("XML streaming error: %w", err)
-		}
-	}
-}
-
-// Bytes streams raw data in chunks and calls the provided callback for each chunk.
-// If bufSize is not positive, the default buffer size from config is used.
-func (s *Streamer) Bytes(callback func([]byte) error, bufSize int) error {
-	if bufSize <= 0 {
-		bufSize = config.DefaultBufferSize
-	}
-	buf := make([]byte, bufSize)
-	defer s.close()
-
-	for {
-		if err := s.checkContext(); err != nil {
-			return err
-		}
-
-		n, err := s.r.Read(buf)
-		if n > 0 {
-			if err := callback(buf[:n]); err != nil {
-				return fmt.Errorf("callback error during streaming: %w", err)
-			}
-		}
-
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return fmt.Errorf("read error during streaming: %w", err)
-		}
-	}
-}
-
-// checkContext verifies whether the context has been canceled.
-func (s *Streamer) checkContext() error {
-	if s.ctx != nil {
-		select {
-		case <-s.ctx.Done():
-			return ErrContextCanceled
-		default:
-		}
-	}
-	return nil
-}
-
-// close closes the underlying resource if it implements io.Closer.
-func (s *Streamer) close() {
-	if s.closer != nil {
-		s.closer.Close()
-	}
-}
-
-// validatePointer ensures that v is a non-nil pointer.
-func validatePointer(v interface{}) error {
-	if v == nil || reflect.ValueOf(v).Kind() != reflect.Ptr {
-		return ErrInvalidPointer
 	}
 	return nil
 }

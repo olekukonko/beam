@@ -5,64 +5,25 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"image"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
-
-	"gopkg.in/vmihailenco/msgpack.v2"
 )
 
 // -----------------------------------------------------------------------------
-// Supported Formats and Status Constants
+// Core Interfaces
 // -----------------------------------------------------------------------------
 
-// Format defines supported content formats.
-type Format int
-
-const (
-	FormatJSON Format = iota
-	FormatMsgPack
-	FormatXML
-	FormatText
-	FormatBinary
-	FormatFormURLEncoded
-	FormatEventStream
-	FormatUnknown
-)
-
-// Status constants for response states.
-const (
-	StatusError      = "-error"
-	StatusPending    = "?pending"
-	StatusSuccessful = "+ok"
-	StatusFatal      = "*fatal"
-)
-
-// Image type constants.
-const (
-	ImageTypePNG  = "image/png"
-	ImageTypeJPEG = "image/jpeg"
-	ImageTypeGIF  = "image/gif"
-	ImageTypeWebp = "image/webp"
-)
-
-// DefaultName is the default application name.
-const DefaultName = "beam"
-
-// ErrSkip is a predefined error for skipping.
-var ErrSkip = errors.New("skip")
-
-// -----------------------------------------------------------------------------
-// Logger, Finalizer, and Preset
-// -----------------------------------------------------------------------------
+// Writer defines the interface for output destinations.
+type Writer interface {
+	Write(data []byte) (int, error)
+}
 
 // Logger is an interface for logging errors.
 type Logger interface {
@@ -72,11 +33,23 @@ type Logger interface {
 // Finalizer defines a function to handle errors after rendering.
 type Finalizer func(w Writer, err error)
 
-// Preset defines a preset for custom content types.
-type Preset struct {
-	ContentType string
-	Headers     http.Header
-}
+// -----------------------------------------------------------------------------
+// Status Constants and Errors
+// -----------------------------------------------------------------------------
+
+// Status constants for response states.
+const (
+	StatusError      = "-error"
+	StatusPending    = "?pending"
+	StatusSuccessful = "+ok"
+	StatusFatal      = "*fatal"
+)
+
+// ErrSkip is a predefined error for skipping.
+var ErrSkip = errors.New("skip")
+
+// ErrContextCanceled is a predefined error for context cancellation.
+var ErrContextCanceled = errors.New("context canceled")
 
 // -----------------------------------------------------------------------------
 // System Metadata and Renderer Settings
@@ -106,22 +79,20 @@ type System struct {
 // Setting configures the renderer.
 type Setting struct {
 	Name          string
-	Format        Format            // Default output format
+	ContentType   string
 	EnableHeaders bool              // Enable sending headers (default true)
 	Presets       map[string]Preset // Custom presets for content types
 }
 
-// -----------------------------------------------------------------------------
-// SSE Event and Callback Types
-// -----------------------------------------------------------------------------
-
-// Event represents a Server-Sent Events (SSE) event.
-type Event struct {
-	ID    string      `json:"id,omitempty"`
-	Type  string      `json:"type,omitempty"`
-	Data  interface{} `json:"data"`
-	Retry int         `json:"retry,omitempty"`
+// Preset defines a preset for custom content types.
+type Preset struct {
+	ContentType string
+	Headers     http.Header
 }
+
+// -----------------------------------------------------------------------------
+// Callback Types
+// -----------------------------------------------------------------------------
 
 // CallbackData carries information to callback functions.
 type CallbackData struct {
@@ -142,36 +113,8 @@ func (c CallbackData) Error() error {
 	return c.Err
 }
 
-// ErrorList is a custom type for a list of errors that implements JSON marshalling.
-type ErrorList []error
-
-// MarshalJSON implements custom JSON marshaling for ErrorList
-func (el ErrorList) MarshalJSON() ([]byte, error) {
-	errStrings := make([]string, len(el))
-	for i, err := range el {
-		if err != nil {
-			errStrings[i] = err.Error()
-		}
-	}
-	return json.Marshal(errStrings)
-}
-
-// UnmarshalJSON implements custom JSON unmarshaling for ErrorList
-func (el *ErrorList) UnmarshalJSON(data []byte) error {
-	var errStrings []string
-	if err := json.Unmarshal(data, &errStrings); err != nil {
-		return err
-	}
-
-	*el = make(ErrorList, len(errStrings))
-	for i, s := range errStrings {
-		(*el)[i] = errors.New(s)
-	}
-	return nil
-}
-
 // -----------------------------------------------------------------------------
-// Response Structure and Encoder Interfaces
+// Response Structure
 // -----------------------------------------------------------------------------
 
 // Response is the standard response structure.
@@ -183,177 +126,34 @@ type Response struct {
 	Info    interface{}            `json:"info,omitempty" xml:"info,omitempty" msgpack:"info"`
 	Data    []interface{}          `json:"data,omitempty" xml:"data,omitempty" msgpack:"data"`
 	Meta    map[string]interface{} `json:"meta,omitempty" xml:"meta,omitempty" msgpack:"meta"`
-	Errors  ErrorList              `json:"errors,omitempty" xml:"errors,omitempty" msgpack:"errors"` // Changed from 'error' to 'errors'
+	Errors  ErrorList              `json:"errors,omitempty" xml:"errors,omitempty" msgpack:"errors"`
 }
 
-// Encoder defines a generic encoding interface.
-type Encoder interface {
-	Marshal(v interface{}) ([]byte, error)
-	Unmarshal(data []byte, v interface{}) error
-}
+// ErrorList is a custom type for a list of errors that implements JSON marshalling.
+type ErrorList []error
 
-// EncoderRegistry manages mappings from Format to Encoder.
-type EncoderRegistry struct {
-	defaults  map[Format]Encoder
-	custom    map[Format]Encoder
-	fallbacks []Encoder
-}
-
-// NewEncoderRegistry initializes an EncoderRegistry with default encoders.
-func NewEncoderRegistry() *EncoderRegistry {
-	return &EncoderRegistry{
-		defaults: map[Format]Encoder{
-			FormatJSON:           &JSONEncoder{},
-			FormatMsgPack:        &MsgPackEncoder{},
-			FormatXML:            &XMLEncoder{},
-			FormatText:           &TextEncoder{},
-			FormatFormURLEncoded: &FormURLEncodedEncoder{},
-			FormatEventStream:    &EventStreamEncoder{},
-		},
-		custom: make(map[Format]Encoder),
-	}
-}
-
-// Register allows registering a custom encoder for a format.
-func (er *EncoderRegistry) Register(f Format, e Encoder) *EncoderRegistry {
-	er.custom[f] = e
-	return er
-}
-
-// Fallback adds fallback encoders.
-func (er *EncoderRegistry) Fallback(e ...Encoder) *EncoderRegistry {
-	er.fallbacks = append(er.fallbacks, e...)
-	return er
-}
-
-// Encode marshals the value v using the encoder for format f.
-func (er *EncoderRegistry) Encode(f Format, v interface{}) ([]byte, error) {
-	if e, ok := er.custom[f]; ok {
-		return e.Marshal(v)
-	}
-	if e, ok := er.defaults[f]; ok {
-		return e.Marshal(v)
-	}
-	if len(er.fallbacks) > 0 {
-		return er.fallbacks[0].Marshal(v)
-	}
-	return nil, fmt.Errorf("no encoder for format %d", f)
-}
-
-// Default Encoders
-
-type JSONEncoder struct{}
-
-func (e *JSONEncoder) Marshal(v interface{}) ([]byte, error) { return json.Marshal(v) }
-func (e *JSONEncoder) Unmarshal(data []byte, v interface{}) error {
-	return json.Unmarshal(data, v)
-}
-
-type MsgPackEncoder struct{}
-
-func (e *MsgPackEncoder) Marshal(v interface{}) ([]byte, error) { return msgpack.Marshal(v) }
-func (e *MsgPackEncoder) Unmarshal(data []byte, v interface{}) error {
-	return msgpack.Unmarshal(data, v)
-}
-
-type XMLEncoder struct{}
-
-func (e *XMLEncoder) Marshal(v interface{}) ([]byte, error) { return xml.Marshal(v) }
-func (e *XMLEncoder) Unmarshal(data []byte, v interface{}) error {
-	return xml.Unmarshal(data, v)
-}
-
-type TextEncoder struct{}
-
-func (e *TextEncoder) Marshal(v interface{}) ([]byte, error) {
-	return []byte(fmt.Sprintf("%v", v)), nil
-}
-func (e *TextEncoder) Unmarshal(data []byte, v interface{}) error { return nil }
-
-type FormURLEncodedEncoder struct{}
-
-func (e *FormURLEncodedEncoder) Marshal(v interface{}) ([]byte, error) {
-	if m, ok := v.(map[string]interface{}); ok {
-		values := url.Values{}
-		for k, val := range m {
-			values.Set(k, fmt.Sprintf("%v", val))
-		}
-		return []byte(values.Encode()), nil
-	}
-	return nil, fmt.Errorf("FormatFormURLEncoded requires map[string]interface{}")
-}
-func (e *FormURLEncodedEncoder) Unmarshal(data []byte, v interface{}) error { return nil }
-
-type EventStreamEncoder struct{}
-
-func (e *EventStreamEncoder) Marshal(v interface{}) ([]byte, error) {
-	if evt, ok := v.(Event); ok {
-		var b strings.Builder
-		if evt.ID != "" {
-			b.WriteString(fmt.Sprintf("id: %s\n", evt.ID))
-		}
-		if evt.Type != "" {
-			b.WriteString(fmt.Sprintf("event: %s\n", evt.Type))
-		}
-		data, err := json.Marshal(evt.Data)
+// MarshalJSON implements custom JSON marshaling for ErrorList.
+func (el ErrorList) MarshalJSON() ([]byte, error) {
+	errStrings := make([]string, len(el))
+	for i, err := range el {
 		if err != nil {
-			return nil, err
+			errStrings[i] = err.Error()
 		}
-		b.WriteString(fmt.Sprintf("data: %s\n", data))
-		if evt.Retry > 0 {
-			b.WriteString(fmt.Sprintf("retry: %d\n", evt.Retry))
-		}
-		b.WriteString("\n")
-		return []byte(b.String()), nil
 	}
-	return nil, fmt.Errorf("FormatEventStream requires Event")
-}
-func (e *EventStreamEncoder) Unmarshal(data []byte, v interface{}) error { return nil }
-
-// -----------------------------------------------------------------------------
-// Protocol and Writer Interfaces
-// -----------------------------------------------------------------------------
-
-// ProtocolHandler manages protocol-specific behavior.
-type ProtocolHandler struct {
-	protocol Protocol
+	return json.Marshal(errStrings)
 }
 
-// NewProtocolHandler creates a new ProtocolHandler.
-func NewProtocolHandler(p Protocol) *ProtocolHandler {
-	return &ProtocolHandler{protocol: p}
-}
-
-// ApplyHeaders applies protocol-specific headers.
-func (ph *ProtocolHandler) ApplyHeaders(w Writer, code int) error {
-	return ph.protocol.ApplyHeaders(w, code)
-}
-
-// Protocol defines protocol-specific behavior.
-type Protocol interface {
-	ApplyHeaders(w Writer, code int) error
-}
-
-// HTTPProtocol implements the HTTP protocol.
-type HTTPProtocol struct{}
-
-func (p *HTTPProtocol) ApplyHeaders(w Writer, code int) error {
-	if hw, ok := w.(http.ResponseWriter); ok {
-		hw.WriteHeader(code)
+// UnmarshalJSON implements custom JSON unmarshaling for ErrorList.
+func (el *ErrorList) UnmarshalJSON(data []byte) error {
+	var errStrings []string
+	if err := json.Unmarshal(data, &errStrings); err != nil {
+		return err
+	}
+	*el = make(ErrorList, len(errStrings))
+	for i, s := range errStrings {
+		(*el)[i] = errors.New(s)
 	}
 	return nil
-}
-
-// TCPProtocol implements a basic TCP protocol.
-type TCPProtocol struct{}
-
-func (p *TCPProtocol) ApplyHeaders(w Writer, code int) error {
-	return nil
-}
-
-// Writer defines the interface for output destinations.
-type Writer interface {
-	Write(data []byte) (int, error)
 }
 
 // -----------------------------------------------------------------------------
@@ -422,7 +222,7 @@ type Renderer struct {
 	encoders     *EncoderRegistry
 	protocol     *ProtocolHandler
 	callbacks    *CallbackManager
-	format       Format
+	contentType  string             // Current content type (e.g., "application/json")
 	errorFilters []func(error) bool // Renderer-level error filters
 	logger       Logger             // Optional logger
 	writer       Writer             // Default writer
@@ -431,26 +231,25 @@ type Renderer struct {
 	system       System             // System metadata configuration
 }
 
-// New creates a new Renderer with the provided settings.
+// New creates a new Renderer with the provided settings and default content type.
 func New(s Setting) *Renderer {
-	if s.Format == FormatUnknown {
-		s.Format = FormatJSON
+	if s.ContentType == "" {
+		s.ContentType = ContentTypeJSON // Fallback to JSON
 	}
 	if s.Name == "" {
-		s.Name = DefaultName
+		s.Name = "beam" // Default name if not provided
 	}
-	s.EnableHeaders = true // Enable headers by default
-	return &Renderer{
-		s:         s,
-		code:      0, // Status code will be set by methods as needed
-		meta:      make(map[string]interface{}),
-		tags:      make([]string, 0),
-		header:    make(http.Header),
-		encoders:  NewEncoderRegistry(),
-		protocol:  NewProtocolHandler(&HTTPProtocol{}),
-		callbacks: NewCallbackManager(),
-		format:    s.Format,
-		start:     time.Now(),
+	r := &Renderer{
+		s:           s,
+		contentType: s.ContentType,
+		code:        0, // Status code set by methods as needed
+		meta:        make(map[string]interface{}),
+		tags:        make([]string, 0),
+		header:      make(http.Header),
+		encoders:    NewEncoderRegistry(),
+		protocol:    NewProtocolHandler(&HTTPProtocol{}),
+		callbacks:   NewCallbackManager(),
+		start:       time.Now(),
 		errorFilters: []func(error) bool{
 			func(err error) bool { return errors.Is(err, sql.ErrNoRows) },
 			func(err error) bool { return errors.Is(err, ErrSkip) },
@@ -466,6 +265,11 @@ func New(s Setting) *Renderer {
 			Show: SystemShowNone, // Off by default
 		},
 	}
+	// Ensure EnableHeaders defaults to true if not set
+	if !r.s.EnableHeaders {
+		r.s.EnableHeaders = true
+	}
+	return r
 }
 
 // clone creates a shallow copy of the renderer with deep copies of mutable fields.
@@ -478,6 +282,10 @@ func (r *Renderer) clone() *Renderer {
 	newRenderer.errorFilters = append([]func(error) bool{}, r.errorFilters...)
 	return &newRenderer
 }
+
+// -----------------------------------------------------------------------------
+// Renderer Configuration Methods
+// -----------------------------------------------------------------------------
 
 // WithWriter sets the default writer for the renderer.
 func (r *Renderer) WithWriter(w Writer) *Renderer {
@@ -529,63 +337,7 @@ func (r *Renderer) WithIDGeneration(enabled bool) *Renderer {
 	return nr
 }
 
-// applyCommonHeaders builds and applies common headers to the writer.
-func (r *Renderer) applyCommonHeaders(w Writer, contentType string) error {
-	if w == nil {
-		return fmt.Errorf("writer cannot be nil")
-	}
-	if r.protocol == nil {
-		return fmt.Errorf("protocol cannot be nil")
-	}
-
-	// Build common headers with a prefix based on the application name.
-	setHeader := func(key, value string) {
-		r.header.Set(fmt.Sprintf("X-%s-%s", r.s.Name, key), value)
-	}
-
-	if r.s.EnableHeaders {
-		r.header.Set("Content-Type", contentType)
-		// Optionally include system metadata in headers.
-		if r.system.Show == SystemShowHeaders || r.system.Show == SystemShowBoth {
-			setHeader("Duration", time.Since(r.start).String())
-			setHeader("Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
-			if r.system.App != "" {
-				setHeader("App", r.system.App)
-			}
-			if r.system.Server != "" {
-				setHeader("Server", r.system.Server)
-			}
-			if r.system.Version != "" {
-				setHeader("Version", r.system.Version)
-			}
-			if r.system.Build != "" {
-				setHeader("Build", r.system.Build)
-			}
-			setHeader("Play", fmt.Sprintf("%t", r.system.Play))
-		}
-		// Apply preset headers if available.
-		if r.s.Presets != nil {
-			if preset, ok := r.s.Presets[contentType]; ok && preset.Headers != nil {
-				for key, values := range preset.Headers {
-					for _, value := range values {
-						r.header.Add(key, value)
-					}
-				}
-			}
-		}
-		// If the writer is an HTTP ResponseWriter, update its header.
-		if hw, ok := w.(http.ResponseWriter); ok {
-			for key, values := range r.header {
-				for _, value := range values {
-					hw.Header().Add(key, value)
-				}
-			}
-		}
-	}
-	return r.protocol.ApplyHeaders(w, r.code)
-}
-
-// Add these helper methods to the Renderer struct in beam.go
+// WithContext sets the context for the renderer.
 func (r *Renderer) WithContext(ctx context.Context) *Renderer {
 	nr := r.clone()
 	nr.ctx = ctx
@@ -649,16 +401,16 @@ func (r *Renderer) FilterError(filters ...func(error) bool) *Renderer {
 }
 
 // UseEncoder registers a custom encoder.
-func (r *Renderer) UseEncoder(f Format, e Encoder) *Renderer {
+func (r *Renderer) UseEncoder(e Encoder) *Renderer {
 	nr := r.clone()
-	nr.encoders.Register(f, e)
+	nr.encoders.Register(e)
 	return nr
 }
 
-// WithFormat sets the output format.
-func (r *Renderer) WithFormat(f Format) *Renderer {
+// WithContentType sets the output content type.
+func (r *Renderer) WithContentType(contentType string) *Renderer {
 	nr := r.clone()
-	nr.format = f
+	nr.contentType = contentType
 	return nr
 }
 
@@ -669,26 +421,68 @@ func (r *Renderer) WithProtocol(p Protocol) *Renderer {
 	return nr
 }
 
-// contentType returns the MIME type for the current format.
-func (r *Renderer) contentType() string {
-	switch r.format {
-	case FormatMsgPack:
-		return "application/msgpack"
-	case FormatXML:
-		return "application/xml"
-	case FormatText:
-		return "text/plain"
-	case FormatBinary:
-		return "application/octet-stream"
-	case FormatFormURLEncoded:
-		return "application/x-www-form-urlencoded"
-	case FormatEventStream:
-		return "text/event-stream"
-	case FormatJSON:
-		fallthrough
-	default:
-		return "application/json"
+// -----------------------------------------------------------------------------
+// Renderer Core Methods
+// -----------------------------------------------------------------------------
+
+// applyCommonHeaders builds and applies common headers to the writer.
+func (r *Renderer) applyCommonHeaders(w Writer, contentType string) error {
+	if w == nil {
+		return fmt.Errorf("writer cannot be nil")
 	}
+	if r.protocol == nil {
+		return fmt.Errorf("protocol cannot be nil")
+	}
+
+	// Build common headers with a prefix based on the application name.
+	setHeader := func(key, value string) {
+		prefix := "X-Beam"
+		if r.s.Name != "" {
+			prefix = fmt.Sprintf("X-%s", r.s.Name)
+		}
+		r.header.Set(fmt.Sprintf("%s-%s", prefix, key), value)
+	}
+
+	if r.s.EnableHeaders {
+		r.header.Set("Content-Type", contentType)
+		// Optionally include system metadata in headers.
+		if r.system.Show == SystemShowHeaders || r.system.Show == SystemShowBoth {
+			setHeader("Duration", time.Since(r.start).String())
+			setHeader("Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+			if r.system.App != "" {
+				setHeader("App", r.system.App)
+			}
+			if r.system.Server != "" {
+				setHeader("Server", r.system.Server)
+			}
+			if r.system.Version != "" {
+				setHeader("Version", r.system.Version)
+			}
+			if r.system.Build != "" {
+				setHeader("Build", r.system.Build)
+			}
+			setHeader("Play", fmt.Sprintf("%t", r.system.Play))
+		}
+		// Apply preset headers if available.
+		if r.s.Presets != nil {
+			if preset, ok := r.s.Presets[contentType]; ok && preset.Headers != nil {
+				for key, values := range preset.Headers {
+					for _, value := range values {
+						r.header.Add(key, value)
+					}
+				}
+			}
+		}
+		// If the writer is an HTTP ResponseWriter, update its header.
+		if hw, ok := w.(http.ResponseWriter); ok {
+			for key, values := range r.header {
+				for _, value := range values {
+					hw.Header().Add(key, value)
+				}
+			}
+		}
+	}
+	return r.protocol.ApplyHeaders(w, r.code)
 }
 
 // triggerCallbacks is a helper to invoke callbacks and optionally log errors.
@@ -717,6 +511,9 @@ func (r *Renderer) Push(w Writer, d Response) error {
 	if w == nil && nr.writer != nil {
 		w = nr.writer
 	}
+	if w == nil {
+		return fmt.Errorf("no writer set; use WithWriter to set a default writer")
+	}
 
 	if nr.generateID && nr.id == "" {
 		nr.id = fmt.Sprintf("req-%d", time.Now().UnixNano())
@@ -725,7 +522,6 @@ func (r *Renderer) Push(w Writer, d Response) error {
 	if d.Status == "" {
 		d.Status = StatusSuccessful
 	}
-
 	if d.Title == "" && d.Status == StatusError {
 		d.Title = "error"
 	}
@@ -762,7 +558,7 @@ func (r *Renderer) Push(w Writer, d Response) error {
 		}
 	}
 
-	encoded, err := nr.encoders.Encode(nr.format, d)
+	encoded, err := nr.encoders.Encode(nr.contentType, d)
 	if err != nil {
 		wrapped := fmt.Errorf("encoding failed: %w", err)
 		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
@@ -772,7 +568,7 @@ func (r *Renderer) Push(w Writer, d Response) error {
 		return wrapped
 	}
 
-	if err := nr.applyCommonHeaders(w, nr.contentType()); err != nil {
+	if err := nr.applyCommonHeaders(w, nr.contentType); err != nil {
 		wrapped := fmt.Errorf("header write failed: %w", err)
 		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {
@@ -795,7 +591,7 @@ func (r *Renderer) Push(w Writer, d Response) error {
 	return nil
 }
 
-// Raw sends raw data using the current format.
+// Raw sends raw data using the current content type.
 func (r *Renderer) Raw(data interface{}) error {
 	nr := r.clone()
 	nr.start = time.Now()
@@ -809,7 +605,8 @@ func (r *Renderer) Raw(data interface{}) error {
 	if nr.code == 0 {
 		nr.code = http.StatusOK // Default for Raw
 	}
-	encoded, err := nr.encoders.Encode(nr.format, data)
+
+	encoded, err := nr.encoders.Encode(nr.contentType, data)
 	if err != nil {
 		wrapped := fmt.Errorf("encoding failed: %w", err)
 		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
@@ -818,7 +615,8 @@ func (r *Renderer) Raw(data interface{}) error {
 		}
 		return wrapped
 	}
-	if err := nr.applyCommonHeaders(w, nr.contentType()); err != nil {
+
+	if err := nr.applyCommonHeaders(w, nr.contentType); err != nil {
 		wrapped := fmt.Errorf("header write failed: %w", err)
 		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {
@@ -826,6 +624,7 @@ func (r *Renderer) Raw(data interface{}) error {
 		}
 		return wrapped
 	}
+
 	_, err = w.Write(encoded)
 	if err != nil {
 		wrapped := fmt.Errorf("write failed: %w", err)
@@ -835,8 +634,92 @@ func (r *Renderer) Raw(data interface{}) error {
 		}
 		return wrapped
 	}
+
 	nr.triggerCallbacks(nr.id, StatusSuccessful, "Raw data sent", nil)
 	return nil
+}
+
+// Stream sends data incrementally using a callback to produce chunks.
+func (r *Renderer) Stream(callback func(*Renderer) (interface{}, error)) error {
+	nr := r.clone()
+	nr.start = time.Now()
+	w := nr.writer
+	if w == nil {
+		return fmt.Errorf("no writer set; use WithWriter to set a default writer")
+	}
+	if nr.generateID && nr.id == "" {
+		nr.id = fmt.Sprintf("req-%d", time.Now().UnixNano())
+	}
+	if nr.code == 0 {
+		nr.code = http.StatusOK // Default for Stream
+	}
+
+	// Check if the encoder supports streaming
+	encoder, ok := nr.encoders.Get(nr.contentType)
+	if !ok {
+		return fmt.Errorf("no encoder for content type %s", nr.contentType)
+	}
+	if streamer, supportsStreaming := encoder.(Streamer); supportsStreaming {
+		// Delegate to the encoder's streaming implementation
+		if err := nr.applyCommonHeaders(w, nr.contentType); err != nil {
+			wrapped := fmt.Errorf("header write failed: %w", err)
+			nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+			if nr.finalizer != nil {
+				nr.finalizer(w, wrapped)
+			}
+			return wrapped
+		}
+		return streamer.Stream(w, func() (interface{}, error) { return callback(nr) })
+	}
+
+	// Fallback to generic streaming if no Streamer implementation
+	if err := nr.applyCommonHeaders(w, nr.contentType); err != nil {
+		wrapped := fmt.Errorf("header write failed: %w", err)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		if nr.finalizer != nil {
+			nr.finalizer(w, wrapped)
+		}
+		return wrapped
+	}
+
+	for {
+		data, err := callback(nr)
+		if err != nil {
+			if errors.Is(err, io.EOF) { // End of stream
+				nr.triggerCallbacks(nr.id, StatusSuccessful, "Stream completed", nil)
+				return nil
+			}
+			wrapped := fmt.Errorf("stream callback failed: %w", err)
+			nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+			if nr.finalizer != nil {
+				nr.finalizer(w, wrapped)
+			}
+			return wrapped
+		}
+
+		encoded, err := nr.encoders.Encode(nr.contentType, data)
+		if err != nil {
+			wrapped := fmt.Errorf("encoding failed: %w", err)
+			nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+			if nr.finalizer != nil {
+				nr.finalizer(w, wrapped)
+			}
+			return wrapped
+		}
+
+		if _, err := w.Write(encoded); err != nil {
+			wrapped := fmt.Errorf("write failed: %w", err)
+			nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+			if nr.finalizer != nil {
+				nr.finalizer(w, wrapped)
+			}
+			return wrapped
+		}
+
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
 }
 
 // Binary sends binary data with proper headers.
@@ -853,6 +736,7 @@ func (r *Renderer) Binary(contentType string, data []byte) error {
 	if nr.code == 0 {
 		nr.code = http.StatusOK // Default for Binary
 	}
+
 	if err := nr.applyCommonHeaders(w, contentType); err != nil {
 		wrapped := fmt.Errorf("header write failed: %w", err)
 		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
@@ -861,6 +745,7 @@ func (r *Renderer) Binary(contentType string, data []byte) error {
 		}
 		return wrapped
 	}
+
 	_, err := w.Write(data)
 	if err != nil {
 		wrapped := fmt.Errorf("binary write failed: %w", err)
@@ -870,6 +755,7 @@ func (r *Renderer) Binary(contentType string, data []byte) error {
 		}
 		return wrapped
 	}
+
 	nr.triggerCallbacks(nr.id, StatusSuccessful, "Binary data sent", nil)
 	return nil
 }
@@ -888,9 +774,10 @@ func (r *Renderer) Image(contentType string, img image.Image) error {
 	if nr.code == 0 {
 		nr.code = http.StatusOK // Default for Image
 	}
+
 	buf := new(bytes.Buffer)
 	switch contentType {
-	case ImageTypePNG:
+	case ContentTypePNG:
 		if err := png.Encode(buf, img); err != nil {
 			wrapped := fmt.Errorf("PNG encoding failed: %w", err)
 			nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
@@ -899,7 +786,7 @@ func (r *Renderer) Image(contentType string, img image.Image) error {
 			}
 			return wrapped
 		}
-	case ImageTypeJPEG:
+	case ContentTypeJPEG:
 		opts := &jpeg.Options{Quality: 80}
 		if err := jpeg.Encode(buf, img, opts); err != nil {
 			wrapped := fmt.Errorf("JPEG encoding failed: %w", err)
@@ -909,7 +796,7 @@ func (r *Renderer) Image(contentType string, img image.Image) error {
 			}
 			return wrapped
 		}
-	case ImageTypeGIF:
+	case ContentTypeGIF:
 		if err := gif.Encode(buf, img, nil); err != nil {
 			wrapped := fmt.Errorf("GIF encoding failed: %w", err)
 			nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
@@ -926,6 +813,7 @@ func (r *Renderer) Image(contentType string, img image.Image) error {
 		}
 		return err
 	}
+
 	return nr.Binary(contentType, buf.Bytes())
 }
 
@@ -994,7 +882,6 @@ func (r *Renderer) Error(format string, errs ...error) error {
 	if r.writer == nil {
 		return fmt.Errorf("no writer set; use WithWriter to set a default writer")
 	}
-	// Check error filters.
 	for _, filter := range r.errorFilters {
 		for _, err := range errs {
 			if filter(err) {
