@@ -2,6 +2,7 @@ package beam
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"encoding/xml"
@@ -18,6 +19,10 @@ import (
 
 	"gopkg.in/vmihailenco/msgpack.v2"
 )
+
+// -----------------------------------------------------------------------------
+// Supported Formats and Status Constants
+// -----------------------------------------------------------------------------
 
 // Format defines supported content formats.
 type Format int
@@ -55,6 +60,10 @@ const DefaultName = "beam"
 // ErrSkip is a predefined error for skipping.
 var ErrSkip = errors.New("skip")
 
+// -----------------------------------------------------------------------------
+// Logger, Finalizer, and Preset
+// -----------------------------------------------------------------------------
+
 // Logger is an interface for logging errors.
 type Logger interface {
 	Log(err error) bool // Returns true if logged successfully
@@ -68,6 +77,10 @@ type Preset struct {
 	ContentType string
 	Headers     http.Header
 }
+
+// -----------------------------------------------------------------------------
+// System Metadata and Renderer Settings
+// -----------------------------------------------------------------------------
 
 // SystemShow controls where system info is displayed.
 type SystemShow int
@@ -93,12 +106,16 @@ type System struct {
 // Setting configures the renderer.
 type Setting struct {
 	Name          string
-	Format        Format            // Default format
-	EnableHeaders bool              // Enable/disable sending headers (default true)
+	Format        Format            // Default output format
+	EnableHeaders bool              // Enable sending headers (default true)
 	Presets       map[string]Preset // Custom presets for content types
 }
 
-// Event represents an SSE event.
+// -----------------------------------------------------------------------------
+// SSE Event and Callback Types
+// -----------------------------------------------------------------------------
+
+// Event represents a Server-Sent Events (SSE) event.
 type Event struct {
 	ID    string      `json:"id,omitempty"`
 	Type  string      `json:"type,omitempty"`
@@ -114,7 +131,7 @@ type CallbackData struct {
 	Tags    []string `json:"tags,omitempty"`
 	Message string   `json:"message,omitempty"`
 	Output  string   `json:"output,omitempty"`
-	Err     error    `json:"-"` // Not marshaled, for Go use
+	Err     error    `json:"-"` // Not marshaled, for internal use
 }
 
 func (c CallbackData) IsError() bool {
@@ -128,16 +145,34 @@ func (c CallbackData) Error() error {
 // ErrorList is a custom type for a list of errors that implements JSON marshalling.
 type ErrorList []error
 
-// MarshalJSON implements custom JSON marshalling for an ErrorList.
+// MarshalJSON implements custom JSON marshaling for ErrorList
 func (el ErrorList) MarshalJSON() ([]byte, error) {
-	strs := make([]string, len(el))
+	errStrings := make([]string, len(el))
 	for i, err := range el {
 		if err != nil {
-			strs[i] = err.Error()
+			errStrings[i] = err.Error()
 		}
 	}
-	return json.Marshal(strs)
+	return json.Marshal(errStrings)
 }
+
+// UnmarshalJSON implements custom JSON unmarshaling for ErrorList
+func (el *ErrorList) UnmarshalJSON(data []byte) error {
+	var errStrings []string
+	if err := json.Unmarshal(data, &errStrings); err != nil {
+		return err
+	}
+
+	*el = make(ErrorList, len(errStrings))
+	for i, s := range errStrings {
+		(*el)[i] = errors.New(s)
+	}
+	return nil
+}
+
+// -----------------------------------------------------------------------------
+// Response Structure and Encoder Interfaces
+// -----------------------------------------------------------------------------
 
 // Response is the standard response structure.
 type Response struct {
@@ -148,7 +183,7 @@ type Response struct {
 	Info    interface{}            `json:"info,omitempty" xml:"info,omitempty" msgpack:"info"`
 	Data    []interface{}          `json:"data,omitempty" xml:"data,omitempty" msgpack:"data"`
 	Meta    map[string]interface{} `json:"meta,omitempty" xml:"meta,omitempty" msgpack:"meta"`
-	Errors  ErrorList              `json:"error,omitempty" xml:"error,omitempty" msgpack:"error"`
+	Errors  ErrorList              `json:"errors,omitempty" xml:"errors,omitempty" msgpack:"errors"` // Changed from 'error' to 'errors'
 }
 
 // Encoder defines a generic encoding interface.
@@ -157,13 +192,14 @@ type Encoder interface {
 	Unmarshal(data []byte, v interface{}) error
 }
 
-// EncoderRegistry manages format-to-encoder mappings.
+// EncoderRegistry manages mappings from Format to Encoder.
 type EncoderRegistry struct {
 	defaults  map[Format]Encoder
 	custom    map[Format]Encoder
 	fallbacks []Encoder
 }
 
+// NewEncoderRegistry initializes an EncoderRegistry with default encoders.
 func NewEncoderRegistry() *EncoderRegistry {
 	return &EncoderRegistry{
 		defaults: map[Format]Encoder{
@@ -178,16 +214,19 @@ func NewEncoderRegistry() *EncoderRegistry {
 	}
 }
 
+// Register allows registering a custom encoder for a format.
 func (er *EncoderRegistry) Register(f Format, e Encoder) *EncoderRegistry {
 	er.custom[f] = e
 	return er
 }
 
+// Fallback adds fallback encoders.
 func (er *EncoderRegistry) Fallback(e ...Encoder) *EncoderRegistry {
 	er.fallbacks = append(er.fallbacks, e...)
 	return er
 }
 
+// Encode marshals the value v using the encoder for format f.
 func (er *EncoderRegistry) Encode(f Format, v interface{}) ([]byte, error) {
 	if e, ok := er.custom[f]; ok {
 		return e.Marshal(v)
@@ -202,6 +241,7 @@ func (er *EncoderRegistry) Encode(f Format, v interface{}) ([]byte, error) {
 }
 
 // Default Encoders
+
 type JSONEncoder struct{}
 
 func (e *JSONEncoder) Marshal(v interface{}) ([]byte, error) { return json.Marshal(v) }
@@ -270,15 +310,21 @@ func (e *EventStreamEncoder) Marshal(v interface{}) ([]byte, error) {
 }
 func (e *EventStreamEncoder) Unmarshal(data []byte, v interface{}) error { return nil }
 
+// -----------------------------------------------------------------------------
+// Protocol and Writer Interfaces
+// -----------------------------------------------------------------------------
+
 // ProtocolHandler manages protocol-specific behavior.
 type ProtocolHandler struct {
 	protocol Protocol
 }
 
+// NewProtocolHandler creates a new ProtocolHandler.
 func NewProtocolHandler(p Protocol) *ProtocolHandler {
 	return &ProtocolHandler{protocol: p}
 }
 
+// ApplyHeaders applies protocol-specific headers.
 func (ph *ProtocolHandler) ApplyHeaders(w Writer, code int) error {
 	return ph.protocol.ApplyHeaders(w, code)
 }
@@ -305,15 +351,26 @@ func (p *TCPProtocol) ApplyHeaders(w Writer, code int) error {
 	return nil
 }
 
+// Writer defines the interface for output destinations.
+type Writer interface {
+	Write(data []byte) (int, error)
+}
+
+// -----------------------------------------------------------------------------
+// Callback Management
+// -----------------------------------------------------------------------------
+
 // CallbackManager handles callback registration and triggering.
 type CallbackManager struct {
 	callbacks []func(data CallbackData)
 }
 
+// NewCallbackManager creates a new CallbackManager.
 func NewCallbackManager() *CallbackManager {
 	return &CallbackManager{}
 }
 
+// Clone creates a copy of the CallbackManager.
 func (cm *CallbackManager) Clone() *CallbackManager {
 	newCM := &CallbackManager{
 		callbacks: append([]func(data CallbackData){}, cm.callbacks...),
@@ -321,11 +378,13 @@ func (cm *CallbackManager) Clone() *CallbackManager {
 	return newCM
 }
 
+// AddCallback registers one or more callbacks.
 func (cm *CallbackManager) AddCallback(cb ...func(data CallbackData)) *CallbackManager {
 	cm.callbacks = append(cm.callbacks, cb...)
 	return cm
 }
 
+// Trigger calls all registered callbacks with the provided data.
 func (cm *CallbackManager) Trigger(id, status, msg string, err error) {
 	if len(cm.callbacks) == 0 {
 		return
@@ -344,12 +403,11 @@ func (cm *CallbackManager) Trigger(id, status, msg string, err error) {
 	}
 }
 
-// Writer defines the interface for output destinations.
-type Writer interface {
-	Write(data []byte) (int, error)
-}
+// -----------------------------------------------------------------------------
+// Renderer: Core Beam Renderer
+// -----------------------------------------------------------------------------
 
-// Renderer is the core Beam renderer.
+// Renderer is the core Beam renderer responsible for constructing and sending responses.
 type Renderer struct {
 	s            Setting
 	name         string
@@ -360,6 +418,7 @@ type Renderer struct {
 	title        string
 	start        time.Time
 	header       http.Header
+	ctx          context.Context
 	encoders     *EncoderRegistry
 	protocol     *ProtocolHandler
 	callbacks    *CallbackManager
@@ -380,10 +439,10 @@ func New(s Setting) *Renderer {
 	if s.Name == "" {
 		s.Name = DefaultName
 	}
-	s.EnableHeaders = true // Default EnableHeaders to true
+	s.EnableHeaders = true // Enable headers by default
 	return &Renderer{
 		s:         s,
-		code:      0, // No default status; set by methods if needed
+		code:      0, // Status code will be set by methods as needed
 		meta:      make(map[string]interface{}),
 		tags:      make([]string, 0),
 		header:    make(http.Header),
@@ -409,6 +468,7 @@ func New(s Setting) *Renderer {
 	}
 }
 
+// clone creates a shallow copy of the renderer with deep copies of mutable fields.
 func (r *Renderer) clone() *Renderer {
 	newRenderer := *r
 	newRenderer.meta = cloneMap(r.meta)
@@ -469,7 +529,7 @@ func (r *Renderer) WithIDGeneration(enabled bool) *Renderer {
 	return nr
 }
 
-// applyCommonHeaders applies headers and protocol settings to the writer.
+// applyCommonHeaders builds and applies common headers to the writer.
 func (r *Renderer) applyCommonHeaders(w Writer, contentType string) error {
 	if w == nil {
 		return fmt.Errorf("writer cannot be nil")
@@ -477,11 +537,15 @@ func (r *Renderer) applyCommonHeaders(w Writer, contentType string) error {
 	if r.protocol == nil {
 		return fmt.Errorf("protocol cannot be nil")
 	}
+
+	// Build common headers with a prefix based on the application name.
 	setHeader := func(key, value string) {
 		r.header.Set(fmt.Sprintf("X-%s-%s", r.s.Name, key), value)
 	}
+
 	if r.s.EnableHeaders {
 		r.header.Set("Content-Type", contentType)
+		// Optionally include system metadata in headers.
 		if r.system.Show == SystemShowHeaders || r.system.Show == SystemShowBoth {
 			setHeader("Duration", time.Since(r.start).String())
 			setHeader("Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
@@ -499,6 +563,7 @@ func (r *Renderer) applyCommonHeaders(w Writer, contentType string) error {
 			}
 			setHeader("Play", fmt.Sprintf("%t", r.system.Play))
 		}
+		// Apply preset headers if available.
 		if r.s.Presets != nil {
 			if preset, ok := r.s.Presets[contentType]; ok && preset.Headers != nil {
 				for key, values := range preset.Headers {
@@ -508,6 +573,7 @@ func (r *Renderer) applyCommonHeaders(w Writer, contentType string) error {
 				}
 			}
 		}
+		// If the writer is an HTTP ResponseWriter, update its header.
 		if hw, ok := w.(http.ResponseWriter); ok {
 			for key, values := range r.header {
 				for _, value := range values {
@@ -517,6 +583,13 @@ func (r *Renderer) applyCommonHeaders(w Writer, contentType string) error {
 		}
 	}
 	return r.protocol.ApplyHeaders(w, r.code)
+}
+
+// Add these helper methods to the Renderer struct in beam.go
+func (r *Renderer) WithContext(ctx context.Context) *Renderer {
+	nr := r.clone()
+	nr.ctx = ctx
+	return nr
 }
 
 // WithStatus sets the HTTP status code.
@@ -618,23 +691,46 @@ func (r *Renderer) contentType() string {
 	}
 }
 
-// Push sends a structured Response.
+// triggerCallbacks is a helper to invoke callbacks and optionally log errors.
+func (r *Renderer) triggerCallbacks(id, status, msg string, err error) {
+	r.callbacks.Trigger(id, status, msg, err)
+	if err != nil && r.logger != nil {
+		r.logger.Log(err)
+	}
+}
+
+// Push sends a structured Response using the current renderer configuration.
 func (r *Renderer) Push(w Writer, d Response) error {
 	nr := r.clone()
 	nr.start = time.Now()
+
+	// Check context cancellation first
+	if nr.ctx != nil {
+		select {
+		case <-nr.ctx.Done():
+			nr.triggerCallbacks(nr.id, StatusError, "operation canceled", ErrContextCanceled)
+			return ErrContextCanceled
+		default:
+		}
+	}
+
 	if w == nil && nr.writer != nil {
 		w = nr.writer
 	}
+
 	if nr.generateID && nr.id == "" {
 		nr.id = fmt.Sprintf("req-%d", time.Now().UnixNano())
 	}
+
 	if d.Status == "" {
 		d.Status = StatusSuccessful
 	}
+
 	if d.Title == "" && d.Status == StatusError {
 		d.Title = "error"
 	}
-	// Apply default status codes only if not set
+
+	// Set default status codes if not already defined
 	if nr.code == 0 {
 		switch d.Status {
 		case StatusSuccessful:
@@ -647,9 +743,11 @@ func (r *Renderer) Push(w Writer, d Response) error {
 			nr.code = http.StatusInternalServerError
 		}
 	}
+
 	d.Tags = cloneSlice(nr.tags)
+
+	// If system display is enabled, include system info in meta
 	if nr.system.Show == SystemShowBody || nr.system.Show == SystemShowBoth {
-		// Initialize Meta map if nil to avoid panic.
 		if d.Meta == nil {
 			d.Meta = make(map[string]interface{})
 		}
@@ -663,33 +761,37 @@ func (r *Renderer) Push(w Writer, d Response) error {
 			"duration":  time.Since(nr.start).String(),
 		}
 	}
-	data, err := nr.encoders.Encode(nr.format, d)
+
+	encoded, err := nr.encoders.Encode(nr.format, d)
 	if err != nil {
 		wrapped := fmt.Errorf("encoding failed: %w", err)
-		nr.callbacks.Trigger(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {
 			nr.finalizer(w, wrapped)
 		}
 		return wrapped
 	}
+
 	if err := nr.applyCommonHeaders(w, nr.contentType()); err != nil {
 		wrapped := fmt.Errorf("header write failed: %w", err)
-		nr.callbacks.Trigger(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {
 			nr.finalizer(w, wrapped)
 		}
 		return wrapped
 	}
-	_, err = w.Write(data)
+
+	_, err = w.Write(encoded)
 	if err != nil {
 		wrapped := fmt.Errorf("write failed: %w", err)
-		nr.callbacks.Trigger(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {
 			nr.finalizer(w, wrapped)
 		}
 		return wrapped
 	}
-	nr.callbacks.Trigger(nr.id, d.Status, d.Message, nil)
+
+	nr.triggerCallbacks(nr.id, d.Status, d.Message, nil)
 	return nil
 }
 
@@ -707,10 +809,10 @@ func (r *Renderer) Raw(data interface{}) error {
 	if nr.code == 0 {
 		nr.code = http.StatusOK // Default for Raw
 	}
-	bytes, err := nr.encoders.Encode(nr.format, data)
+	encoded, err := nr.encoders.Encode(nr.format, data)
 	if err != nil {
 		wrapped := fmt.Errorf("encoding failed: %w", err)
-		nr.callbacks.Trigger(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {
 			nr.finalizer(w, wrapped)
 		}
@@ -718,22 +820,22 @@ func (r *Renderer) Raw(data interface{}) error {
 	}
 	if err := nr.applyCommonHeaders(w, nr.contentType()); err != nil {
 		wrapped := fmt.Errorf("header write failed: %w", err)
-		nr.callbacks.Trigger(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {
 			nr.finalizer(w, wrapped)
 		}
 		return wrapped
 	}
-	_, err = w.Write(bytes)
+	_, err = w.Write(encoded)
 	if err != nil {
 		wrapped := fmt.Errorf("write failed: %w", err)
-		nr.callbacks.Trigger(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {
 			nr.finalizer(w, wrapped)
 		}
 		return wrapped
 	}
-	nr.callbacks.Trigger(nr.id, StatusSuccessful, "Raw data sent", nil)
+	nr.triggerCallbacks(nr.id, StatusSuccessful, "Raw data sent", nil)
 	return nil
 }
 
@@ -753,7 +855,7 @@ func (r *Renderer) Binary(contentType string, data []byte) error {
 	}
 	if err := nr.applyCommonHeaders(w, contentType); err != nil {
 		wrapped := fmt.Errorf("header write failed: %w", err)
-		nr.callbacks.Trigger(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {
 			nr.finalizer(w, wrapped)
 		}
@@ -762,13 +864,13 @@ func (r *Renderer) Binary(contentType string, data []byte) error {
 	_, err := w.Write(data)
 	if err != nil {
 		wrapped := fmt.Errorf("binary write failed: %w", err)
-		nr.callbacks.Trigger(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 		if nr.finalizer != nil {
 			nr.finalizer(w, wrapped)
 		}
 		return wrapped
 	}
-	nr.callbacks.Trigger(nr.id, StatusSuccessful, "Binary data sent", nil)
+	nr.triggerCallbacks(nr.id, StatusSuccessful, "Binary data sent", nil)
 	return nil
 }
 
@@ -791,7 +893,7 @@ func (r *Renderer) Image(contentType string, img image.Image) error {
 	case ImageTypePNG:
 		if err := png.Encode(buf, img); err != nil {
 			wrapped := fmt.Errorf("PNG encoding failed: %w", err)
-			nr.callbacks.Trigger(nr.id, StatusFatal, wrapped.Error(), wrapped)
+			nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 			if nr.finalizer != nil {
 				nr.finalizer(w, wrapped)
 			}
@@ -801,7 +903,7 @@ func (r *Renderer) Image(contentType string, img image.Image) error {
 		opts := &jpeg.Options{Quality: 80}
 		if err := jpeg.Encode(buf, img, opts); err != nil {
 			wrapped := fmt.Errorf("JPEG encoding failed: %w", err)
-			nr.callbacks.Trigger(nr.id, StatusFatal, wrapped.Error(), wrapped)
+			nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 			if nr.finalizer != nil {
 				nr.finalizer(w, wrapped)
 			}
@@ -810,7 +912,7 @@ func (r *Renderer) Image(contentType string, img image.Image) error {
 	case ImageTypeGIF:
 		if err := gif.Encode(buf, img, nil); err != nil {
 			wrapped := fmt.Errorf("GIF encoding failed: %w", err)
-			nr.callbacks.Trigger(nr.id, StatusFatal, wrapped.Error(), wrapped)
+			nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
 			if nr.finalizer != nil {
 				nr.finalizer(w, wrapped)
 			}
@@ -818,7 +920,7 @@ func (r *Renderer) Image(contentType string, img image.Image) error {
 		}
 	default:
 		err := fmt.Errorf("unsupported image content type: %s", contentType)
-		nr.callbacks.Trigger(nr.id, StatusError, err.Error(), err)
+		nr.triggerCallbacks(nr.id, StatusError, err.Error(), err)
 		if nr.finalizer != nil {
 			nr.finalizer(w, err)
 		}
@@ -827,7 +929,10 @@ func (r *Renderer) Image(contentType string, img image.Image) error {
 	return nr.Binary(contentType, buf.Bytes())
 }
 
+// -----------------------------------------------------------------------------
 // Convenience Methods (Writer-less versions)
+// -----------------------------------------------------------------------------
+
 func (r *Renderer) Info(msg string, info interface{}) error {
 	if r.writer == nil {
 		return fmt.Errorf("no writer set; use WithWriter to set a default writer")
@@ -889,6 +994,7 @@ func (r *Renderer) Error(format string, errs ...error) error {
 	if r.writer == nil {
 		return fmt.Errorf("no writer set; use WithWriter to set a default writer")
 	}
+	// Check error filters.
 	for _, filter := range r.errorFilters {
 		for _, err := range errs {
 			if filter(err) {
@@ -962,6 +1068,7 @@ func (r *Renderer) Log(err error) {
 	}
 }
 
+// Handler returns an http.HandlerFunc that uses the renderer to handle requests.
 func (r *Renderer) Handler(fn func(r *Renderer) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		renderer := r.WithWriter(w)
@@ -971,7 +1078,11 @@ func (r *Renderer) Handler(fn func(r *Renderer) error) http.HandlerFunc {
 	}
 }
 
-// Helper functions for deep copying mutable fields
+// -----------------------------------------------------------------------------
+// Helper Functions for Deep Copying Mutable Fields
+// -----------------------------------------------------------------------------
+
+// cloneHeader creates a deep copy of the given http.Header.
 func cloneHeader(h http.Header) http.Header {
 	newHeader := make(http.Header)
 	for k, v := range h {
@@ -982,6 +1093,7 @@ func cloneHeader(h http.Header) http.Header {
 	return newHeader
 }
 
+// cloneMap creates a shallow copy of a map.
 func cloneMap(m map[string]interface{}) map[string]interface{} {
 	newMap := make(map[string]interface{})
 	for k, v := range m {
@@ -990,6 +1102,7 @@ func cloneMap(m map[string]interface{}) map[string]interface{} {
 	return newMap
 }
 
+// cloneSlice creates a deep copy of a string slice.
 func cloneSlice(s []string) []string {
 	newSlice := make([]string, len(s))
 	copy(newSlice, s)
