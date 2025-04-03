@@ -1,8 +1,8 @@
 # Beam - Flexible Response Rendering for Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/aibox/beam.svg)](https://pkg.go.dev/github.com/aibox/beam)
-[![Go Report Card](https://goreportcard.com/badge/github.com/aibox/beam)](https://goreportcard.com/report/github.com/aibox/beam)
-[![Tests](https://github.com/aibox/beam/actions/workflows/go.yml/badge.svg)](https://github.com/aibox/beam/actions/workflows/go.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/olekukonko/beam.svg)](https://pkg.go.dev/github.com/olekukonko/beam)
+[![Go Report Card](https://goreportcard.com/badge/github.com/olekukonko/beam)](https://goreportcard.com/report/github.com/olekukonko/beam)
+[![Tests](https://github.com/olekukonko/beam/actions/workflows/go.yml/badge.svg)](https://github.com/olekukonko/beam/actions/workflows/go.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Beam is a versatile Go package designed to streamline API response generation with a focus on flexibility, performance, and consistency. Whether you need to render JSON, stream large datasets, or handle errors gracefully, Beam provides a robust toolkit for building modern, scalable web services.
@@ -54,7 +54,7 @@ Beam is a versatile Go package designed to streamline API response generation wi
 Install Beam using:
 
 ```bash
-go get github.com/aibox/beam
+go get github.com/olekukonko/beam
 ```
 
 **Note**: Some features (e.g., image rendering) require additional standard library packages like `image/png`
@@ -70,7 +70,7 @@ package main
 
 import (
 	"net/http"
-	"github.com/aibox/beam"
+	"github.com/olekukonko/beam"
 )
 
 func main() {
@@ -321,7 +321,7 @@ import (
 	"image/color"
 	"net/http"
 
-	"github.com/aibox/beam"
+	"github.com/olekukonko/beam"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -418,7 +418,7 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"github.com/aibox/beam/puller"
+	"github.com/olekukonko/beam/puller"
 )
 
 func main() {
@@ -444,7 +444,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"github.com/aibox/beam/puller"
+	"github.com/olekukonko/beam/puller"
 )
 
 func main() {

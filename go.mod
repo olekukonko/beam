@@ -1,4 +1,4 @@
-module github.com/aibox/beam
+module github.com/olekukonko/beam
 
 go 1.21
 
