@@ -143,7 +143,7 @@ func (s *Streamer) checkContext() error {
 // close closes the underlying resource if it implements io.Closer.
 func (s *Streamer) close() {
 	if s.closer != nil {
-		s.closer.Close()
+		_ = s.closer.Close()
 	}
 }
 

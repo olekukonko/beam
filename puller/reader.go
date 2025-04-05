@@ -7,11 +7,9 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"github.com/vmihailenco/msgpack/v5"
 	"io"
 	"reflect"
-	"sync"
-
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Common errors
@@ -22,7 +20,6 @@ var (
 	ErrContextCanceled         = errors.New("operation canceled by context")
 	ErrReadAllFailed           = errors.New("failed to read all data")
 	ErrDecodingFailed          = errors.New("failed to decode data")
-	ErrMsgPackUnsupported      = errors.New("MessagePack format not supported")
 )
 
 // Config holds package configuration.
@@ -53,11 +50,11 @@ func SetConfig(cfg Config) {
 }
 
 // byteBufferPool reuses buffers for reading operations.
-var byteBufferPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 0, config.InitialBufferCapacity)
-	},
-}
+//var byteBufferPool = sync.Pool{
+//	New: func() interface{} {
+//		return make([]byte, 0, config.InitialBufferCapacity)
+//	},
+//}
 
 // -----------------------------------------------------------------------------
 // Reader: One-shot operations for complete data decoding.
@@ -95,7 +92,7 @@ func (r *Reader) PULL() ([]byte, error) {
 	data, err := io.ReadAll(r.r)
 	// Ensure we close the resource after reading.
 	if r.closer != nil {
-		r.closer.Close()
+		_ = r.closer.Close()
 	}
 
 	if err != nil {
@@ -119,7 +116,7 @@ func (r *Reader) MsgPack(v interface{}) error {
 	decoder := msgpack.NewDecoder(r.r)
 	err := decoder.Decode(v)
 	if r.closer != nil {
-		r.closer.Close()
+		_ = r.closer.Close()
 	}
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrDecodingFailed, err)
@@ -139,7 +136,7 @@ func (r *Reader) JSON(v interface{}) error {
 	decoder := json.NewDecoder(r.r)
 	err := decoder.Decode(v)
 	if r.closer != nil {
-		r.closer.Close()
+		_ = r.closer.Close()
 	}
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrDecodingFailed, err)
@@ -159,7 +156,7 @@ func (r *Reader) XML(v interface{}) error {
 	decoder := xml.NewDecoder(r.r)
 	err := decoder.Decode(v)
 	if r.closer != nil {
-		r.closer.Close()
+		_ = r.closer.Close()
 	}
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrDecodingFailed, err)
