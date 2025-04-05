@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"gopkg.in/vmihailenco/msgpack.v2"
+	"github.com/vmihailenco/msgpack/v5"
 	"strings"
 	"testing"
 	"time"

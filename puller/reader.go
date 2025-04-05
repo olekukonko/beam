@@ -11,7 +11,7 @@ import (
 	"reflect"
 	"sync"
 
-	"gopkg.in/vmihailenco/msgpack.v2"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Common errors
