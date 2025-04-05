@@ -2,10 +2,7 @@ module github.com/olekukonko/beam
 
 go 1.21
 
-require (
-	github.com/go-chi/chi/v5 v5.2.1
-	gopkg.in/vmihailenco/msgpack.v2 v2.9.2
-)
+require gopkg.in/vmihailenco/msgpack.v2 v2.9.2
 
 require (
 	github.com/golang/protobuf v1.5.2 // indirect
