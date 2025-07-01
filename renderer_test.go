@@ -714,3 +714,16 @@ func TestEncoderErrorHandling(t *testing.T) {
 		}
 	})
 }
+
+func TestEventStreamEncoderFormat(t *testing.T) {
+	enc := &EventStreamEncoder{}
+	event := Event{ID: "1", Data: "test"}
+	b, err := enc.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "id: 1\ndata: \"test\"\n\n"
+	if string(b) != expected {
+		t.Errorf("Expected %q, got %q", expected, string(b))
+	}
+}

@@ -83,8 +83,8 @@ func NewPullerWithContext(ctx context.Context, r io.Reader) *Reader {
 	return rd
 }
 
-// PULL reads all data from the underlying reader.
-func (r *Reader) PULL() ([]byte, error) {
+// Pull reads all data from the underlying reader.
+func (r *Reader) Pull() ([]byte, error) {
 	if err := r.checkContext(); err != nil {
 		return nil, err
 	}
@@ -102,6 +102,12 @@ func (r *Reader) PULL() ([]byte, error) {
 		return nil, fmt.Errorf("%w: %v", ErrReadAllFailed, err)
 	}
 	return data, nil
+}
+
+// PULL reads all data from the underlying reader.
+// Deprecated: use Pull
+func (r *Reader) PULL() ([]byte, error) {
+	return r.Pull()
 }
 
 // MsgPack decodes MessagePack data into the provided pointer.
