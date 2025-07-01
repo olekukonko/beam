@@ -6,61 +6,14 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
-	"fmt"
 	"github.com/vmihailenco/msgpack/v5"
 	"io"
 	"reflect"
 )
 
-// Common errors
-var (
-	ErrInvalidPointer          = errors.New("must provide a non-nil pointer")
-	ErrInvalidStringPointer    = errors.New("TXT requires a pointer to string")
-	ErrInvalidByteSlicePointer = errors.New("BYTE/B64 requires a pointer to byte slice")
-	ErrContextCanceled         = errors.New("operation canceled by context")
-	ErrReadAllFailed           = errors.New("failed to read all data")
-	ErrDecodingFailed          = errors.New("failed to decode data")
-)
-
-// Config holds package configuration.
-type Config struct {
-	DefaultBufferSize     int // Default chunk size for streaming operations.
-	LargeContentThreshold int // Content size threshold to favor streaming.
-	InitialBufferCapacity int // Initial capacity for pooled buffers.
-}
-
-// Global package configuration with sensible defaults.
-var config = Config{
-	DefaultBufferSize:     32 * 1024,   // 32KB
-	LargeContentThreshold: 1024 * 1024, // 1MB
-	InitialBufferCapacity: 4096,        // 4KB
-}
-
-// SetConfig updates the package configuration.
-func SetConfig(cfg Config) {
-	if cfg.DefaultBufferSize > 0 {
-		config.DefaultBufferSize = cfg.DefaultBufferSize
-	}
-	if cfg.LargeContentThreshold > 0 {
-		config.LargeContentThreshold = cfg.LargeContentThreshold
-	}
-	if cfg.InitialBufferCapacity > 0 {
-		config.InitialBufferCapacity = cfg.InitialBufferCapacity
-	}
-}
-
-// byteBufferPool reuses buffers for reading operations.
-//var byteBufferPool = sync.Pool{
-//	New: func() interface{} {
-//		return make([]byte, 0, config.InitialBufferCapacity)
-//	},
-//}
-
-// -----------------------------------------------------------------------------
-// Reader: One-shot operations for complete data decoding.
-// -----------------------------------------------------------------------------
-
 // Reader wraps an io.Reader (and optionally an io.Closer) and supports context cancellation.
+// Provides one-shot decoding for JSON, XML, MessagePack, and raw data.
+// Closes the reader if it implements io.Closer after processing.
 type Reader struct {
 	r      io.Reader
 	closer io.Closer
@@ -68,6 +21,8 @@ type Reader struct {
 }
 
 // NewReader creates a new Reader instance.
+// Takes an io.Reader to read data from.
+// Returns a *Reader, setting closer if the reader implements io.Closer.
 func NewReader(r io.Reader) *Reader {
 	var c io.Closer
 	if rc, ok := r.(io.Closer); ok {
@@ -77,6 +32,8 @@ func NewReader(r io.Reader) *Reader {
 }
 
 // NewPullerWithContext creates a new Reader with cancellation support.
+// Takes a context.Context and an io.Reader for reading.
+// Returns a *Reader with context and optional closer initialized.
 func NewPullerWithContext(ctx context.Context, r io.Reader) *Reader {
 	rd := NewReader(r)
 	rd.ctx = ctx
@@ -84,6 +41,8 @@ func NewPullerWithContext(ctx context.Context, r io.Reader) *Reader {
 }
 
 // Pull reads all data from the underlying reader.
+// Reads all available data into a byte slice.
+// Returns the data or an error if reading or context fails.
 func (r *Reader) Pull() ([]byte, error) {
 	if err := r.checkContext(); err != nil {
 		return nil, err
@@ -99,18 +58,21 @@ func (r *Reader) Pull() ([]byte, error) {
 		if r.ctx != nil && errors.Is(err, context.Canceled) {
 			return nil, ErrContextCanceled
 		}
-		return nil, fmt.Errorf("%w: %v", ErrReadAllFailed, err)
+		return nil, errors.Join(ErrReadAllFailed, err)
 	}
 	return data, nil
 }
 
 // PULL reads all data from the underlying reader.
-// Deprecated: use Pull
+// Deprecated: use Pull instead for reading all data.
+// Returns the data or an error if reading or context fails.
 func (r *Reader) PULL() ([]byte, error) {
 	return r.Pull()
 }
 
 // MsgPack decodes MessagePack data into the provided pointer.
+// Takes a pointer to a value for MessagePack decoding.
+// Returns an error if decoding, context, or pointer validation fails.
 func (r *Reader) MsgPack(v interface{}) error {
 	if err := validatePointer(v); err != nil {
 		return err
@@ -125,12 +87,14 @@ func (r *Reader) MsgPack(v interface{}) error {
 		_ = r.closer.Close()
 	}
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrDecodingFailed, err)
+		return errors.Join(errMsgPackDecoding, err)
 	}
 	return nil
 }
 
 // JSON decodes JSON data into the provided pointer.
+// Takes a pointer to a value for JSON decoding.
+// Returns an error if decoding, context, or pointer validation fails.
 func (r *Reader) JSON(v interface{}) error {
 	if err := validatePointer(v); err != nil {
 		return err
@@ -145,12 +109,14 @@ func (r *Reader) JSON(v interface{}) error {
 		_ = r.closer.Close()
 	}
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrDecodingFailed, err)
+		return errors.Join(errJSONDecoding, err)
 	}
 	return nil
 }
 
 // XML decodes XML data into the provided pointer.
+// Takes a pointer to a value for XML decoding.
+// Returns an error if decoding, context, or pointer validation fails.
 func (r *Reader) XML(v interface{}) error {
 	if err := validatePointer(v); err != nil {
 		return err
@@ -165,12 +131,14 @@ func (r *Reader) XML(v interface{}) error {
 		_ = r.closer.Close()
 	}
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrDecodingFailed, err)
+		return errors.Join(errXMLDecoding, err)
 	}
 	return nil
 }
 
 // B64 decodes Base64 data into the provided byte slice pointer.
+// Takes a pointer to a byte slice for Base64 decoding.
+// Returns an error if decoding, context, or pointer validation fails.
 func (r *Reader) B64(v interface{}) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Slice {
@@ -185,13 +153,15 @@ func (r *Reader) B64(v interface{}) error {
 	decoded := make([]byte, base64.StdEncoding.DecodedLen(len(data)))
 	n, err := base64.StdEncoding.Decode(decoded, data)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrDecodingFailed, err)
+		return errors.Join(errB64Decoding, err)
 	}
 	rv.Elem().SetBytes(decoded[:n])
 	return nil
 }
 
 // Byte reads raw bytes into the provided byte slice pointer.
+// Takes a pointer to a byte slice for raw data.
+// Returns an error if reading, context, or pointer validation fails.
 func (r *Reader) Byte(v interface{}) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Slice {
@@ -207,6 +177,8 @@ func (r *Reader) Byte(v interface{}) error {
 }
 
 // Text reads data as a string into the provided string pointer.
+// Takes a pointer to a string for text data.
+// Returns an error if reading, context, or pointer validation fails.
 func (r *Reader) Text(v *string) error {
 	if v == nil {
 		return ErrInvalidStringPointer
@@ -221,6 +193,8 @@ func (r *Reader) Text(v *string) error {
 }
 
 // checkContext verifies whether the context has been canceled.
+// Checks if the Reader's context is non-nil and canceled.
+// Returns ErrContextCanceled if canceled, nil otherwise.
 func (r *Reader) checkContext() error {
 	if r.ctx != nil {
 		select {
@@ -228,6 +202,16 @@ func (r *Reader) checkContext() error {
 			return ErrContextCanceled
 		default:
 		}
+	}
+	return nil
+}
+
+// validatePointer ensures that v is a non-nil pointer.
+// Takes an interface{} to validate as a pointer.
+// Returns ErrInvalidPointer if v is nil or not a pointer, nil otherwise.
+func validatePointer(v interface{}) error {
+	if v == nil || reflect.ValueOf(v).Kind() != reflect.Ptr {
+		return ErrInvalidPointer
 	}
 	return nil
 }
