@@ -727,3 +727,16 @@ func TestEventStreamEncoderFormat(t *testing.T) {
 		t.Errorf("Expected %q, got %q", expected, string(b))
 	}
 }
+
+func TestResponsePoolReset(t *testing.T) {
+	r := getResponse()
+	r.Status = "test"
+	r.Meta["key"] = "value"
+	r.Tags = []string{"tag"}
+	r.Errors = []error{errors.New("error")}
+	putResponse(r)
+	r2 := getResponse()
+	if r2.Status != "" || len(r2.Meta) != 0 || len(r2.Tags) != 0 || len(r2.Errors) != 0 {
+		t.Errorf("Response pool did not reset fields: %+v", r2)
+	}
+}
