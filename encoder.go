@@ -431,15 +431,15 @@ func (e *XMLEncoder) marshalResponse(resp Response) ([]byte, error) {
 	}
 
 	type Alias struct {
-		XMLName xml.Name      `xml:"response"` // root element
-		Status  string        `xml:"status"`
-		Title   string        `xml:"title,omitempty"`
-		Message string        `xml:"message,omitempty"`
-		Tags    []string      `xml:"tags,omitempty"`
-		Info    interface{}   `xml:"info,omitempty"`
-		Data    []interface{} `xml:"data,omitempty"`
-		Meta    *MetaWrapper  `xml:"meta,omitempty"`
-		Errors  ErrorList     `xml:"errors,omitempty"`
+		XMLName xml.Name     `xml:"response"` // root element
+		Status  string       `xml:"status"`
+		Title   string       `xml:"title,omitempty"`
+		Message string       `xml:"message,omitempty"`
+		Tags    []string     `xml:"tags,omitempty"`
+		Info    interface{}  `xml:"info,omitempty"`
+		Data    interface{}  `xml:"data,omitempty"`
+		Meta    *MetaWrapper `xml:"meta,omitempty"`
+		Errors  ErrorList    `xml:"errors,omitempty"`
 	}
 
 	// Build the MetaWrapper if there is meta information

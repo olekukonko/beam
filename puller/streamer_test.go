@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/vmihailenco/msgpack/v5"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // infiniteReader is an io.Reader that never ends (for testing cancellation)

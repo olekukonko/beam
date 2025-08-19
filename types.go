@@ -31,11 +31,6 @@ type Logger interface {
 // Used by Renderer to finalize error responses.
 type Finalizer func(w Writer, err error)
 
-// ErrSkip is a predefined error for skipping.
-// Indicates an operation should be skipped without failure.
-// Used in error filters to bypass certain errors.
-var ErrSkip = errors.New("skip")
-
 // ErrContextCanceled is a predefined error for context cancellation.
 // Signals that a context was canceled during operation.
 // Used by Renderer to handle canceled requests.
@@ -50,8 +45,9 @@ type System struct {
 	Version  string        `json:"version,omitempty" xml:"Version,omitempty"`
 	Build    string        `json:"build,omitempty" xml:"Build,omitempty"`
 	Play     bool          `json:"play,omitempty" xml:"Play,omitempty"`
-	Show     SystemShow    `json:"-" xml:"-"`
 	Duration time.Duration `json:"duration" xml:"Duration"`
+
+	show SystemShow `json:"-" xml:"-"`
 }
 
 // MarshalJSON provides a custom JSON encoding for System.
@@ -141,9 +137,20 @@ type Response struct {
 	Message string                 `json:"message,omitempty" xml:"message,omitempty" msgpack:"message"`
 	Tags    []string               `json:"tags,omitempty" xml:"tags,omitempty" msgpack:"tags"`
 	Info    interface{}            `json:"info,omitempty" xml:"info,omitempty" msgpack:"info"`
-	Data    []interface{}          `json:"data,omitempty" xml:"data,omitempty" msgpack:"data"`
+	Data    interface{}            `json:"data,omitempty" xml:"data,omitempty" msgpack:"data"`
 	Meta    map[string]interface{} `json:"meta,omitempty" xml:"meta,omitempty" msgpack:"meta"`
 	Errors  ErrorList              `json:"errors,omitempty" xml:"errors,omitempty" msgpack:"errors"`
+	Actions []Action               `json:"actions,omitempty" xml:"actions,omitempty" msgpack:"actions"`
+}
+
+// Action represents a possible next step the client can take
+type Action struct {
+	Name        string                 `json:"name"`                  // Unique identifier for the action
+	Description string                 `json:"description,omitempty"` // Human-readable description
+	Method      string                 `json:"method,omitempty"`      // HTTP method (GET, POST, etc)
+	Href        string                 `json:"href,omitempty"`        // URL or URI template
+	Parameters  map[string]interface{} `json:"parameters,omitempty"`  // Required parameters
+	Headers     map[string]string      `json:"headers,omitempty"`     // Required headers
 }
 
 // ErrorList is a custom type for a list of errors that implements JSON marshalling.

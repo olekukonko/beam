@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
-	"github.com/vmihailenco/msgpack/v5"
 	"io"
 	"reflect"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Reader wraps an io.Reader (and optionally an io.Closer) and supports context cancellation.

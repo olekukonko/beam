@@ -25,7 +25,7 @@ var (
 	errMsgPackDecoding = errors.New("MessagePack decoding error")
 	errJSONDecoding    = errors.New("JSON decoding error")
 	errXMLDecoding     = errors.New("XML decoding error")
-	errB64Decoding     = errors.New("Base64 decoding error")
+	errB64Decoding     = errors.New("base64 decoding error")
 )
 
 // Config holds package configuration.
