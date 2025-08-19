@@ -1,7 +1,6 @@
 package beam
 
 import (
-	"errors"
 	"net/http"
 )
 
@@ -11,13 +10,6 @@ import (
 type Protocol interface {
 	ApplyHeaders(w Writer, code int) error
 }
-
-// Common errors for protocol handling.
-// Defines reusable error values for protocol operations.
-// Used in ProtocolHandler and HTTPProtocol for consistent errors.
-var (
-	errHTTPWriterRequired = errors.New("HTTPProtocol requires an http.ResponseWriter")
-)
 
 // ProtocolHandler manages protocol-specific behavior.
 // Wraps a Protocol to handle header application.
