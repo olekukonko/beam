@@ -23,7 +23,13 @@ type Writer interface {
 // Defines a method to log an error and indicate success.
 // Used by Renderer to log errors during response handling.
 type Logger interface {
-	Log(err error) bool // Returns true if logged successfully
+	// Error logs a non-fatal error with structured context.
+	Error(err error, fields ...interface{})
+
+	// Fatal logs a fatal error with structured context.
+	// The implementation may or may not exit the application,
+	// but it should be treated as the highest severity.
+	Fatal(err error, fields ...interface{})
 }
 
 // Finalizer defines a function to handle errors after rendering.
@@ -47,7 +53,7 @@ type System struct {
 	Play     bool          `json:"play,omitempty" xml:"Play,omitempty"`
 	Duration time.Duration `json:"duration" xml:"Duration"`
 
-	show SystemShow `json:"-" xml:"-"`
+	// show SystemShow `json:"-" xml:"-"`
 }
 
 // MarshalJSON provides a custom JSON encoding for System.
@@ -240,5 +246,22 @@ func (cm *CallbackManager) Trigger(id, status, msg string, err error) {
 	}
 	for _, cb := range cm.callbacks {
 		cb(data)
+	}
+}
+
+type State int
+
+// Enabled checks if the state is on
+func (o State) Enabled() bool { return o == Yes }
+
+// Default checks if the state is unknown
+func (o State) Default() bool { return o == Unknown }
+
+// Disabled checks if the state is off
+func (o State) Disabled() bool { return o == No }
+
+func (o State) On(f func()) {
+	if o == Yes {
+		f()
 	}
 }

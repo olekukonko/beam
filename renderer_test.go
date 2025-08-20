@@ -19,13 +19,40 @@ import (
 )
 
 // TestLogger is a test implementation of the Logger interface
-type TestLogger struct {
-	LoggedErrors []error
+type LogEntry struct {
+	Level  string
+	Err    error
+	Fields []interface{}
 }
 
-func (tl *TestLogger) Log(err error) bool {
-	tl.LoggedErrors = append(tl.LoggedErrors, err)
-	return true
+// TestLogger is a test implementation of the beam.Logger interface
+// that captures structured, level-aware log entries.
+type TestLogger struct {
+	Entries []LogEntry
+}
+
+func (tl *TestLogger) Error(err error, fields ...interface{}) {
+	tl.Entries = append(tl.Entries, LogEntry{
+		Level:  "error",
+		Err:    err,
+		Fields: fields,
+	})
+}
+
+func (tl *TestLogger) Fatal(err error, fields ...interface{}) {
+	tl.Entries = append(tl.Entries, LogEntry{
+		Level:  "fatal",
+		Err:    err,
+		Fields: fields,
+	})
+}
+
+// LastEntry returns the most recent log entry, if any.
+func (tl *TestLogger) LastEntry() *LogEntry {
+	if len(tl.Entries) == 0 {
+		return nil
+	}
+	return &tl.Entries[len(tl.Entries)-1]
 }
 
 // TestWriter is a test implementation of the Writer interface
@@ -167,7 +194,7 @@ func TestRenderer_WithMethods(t *testing.T) {
 	t.Run("WithSystem", func(t *testing.T) {
 		sys := System{App: "test-app"}
 		r := base.WithSystem(SystemShowHeaders, sys)
-		if r.system.App != "test-app" || r.system.show != SystemShowHeaders {
+		if r.system.App != "test-app" || r.showSystem != SystemShowHeaders {
 			t.Error("WithSystem did not configure system settings")
 		}
 	})
@@ -219,7 +246,7 @@ func TestRenderer_Push(t *testing.T) {
 
 	t.Run("WithSystemInfo", func(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
-		sys := System{App: "test-app", show: SystemShowBody}
+		sys := System{App: "test-app"}
 		r := NewRenderer(settings).WithWriter(tw).WithSystem(SystemShowBody, sys)
 		resp := Response{Status: StatusSuccessful}
 
@@ -296,8 +323,6 @@ func TestRenderer_Stream(t *testing.T) {
 		}
 
 		output := tfw.Buffer.String()
-		// FIX: The expected output is two events, each terminated by a double newline.
-		// The previous version had an extra newline between them.
 		expected := "id: 1\ndata: \"test\"\n\nid: 2\ndata: \"test\"\n\n"
 		if output != expected {
 			t.Errorf("Expected output %q, got %q", expected, output)
@@ -503,9 +528,7 @@ func TestRenderer_Handler(t *testing.T) {
 			t.Errorf("Expected status 500, got %d", w.Code)
 		}
 
-		// Note: The default finalizer writes the error, so our handler will also write.
-		// We primarily check that the logger was called.
-		if len(testLogger.LoggedErrors) < 1 {
+		if len(testLogger.Entries) < 1 {
 			t.Error("Handler error was not logged")
 		}
 	})
@@ -519,7 +542,7 @@ func TestContextCancellation(t *testing.T) {
 		tw := &TestWriter{Headers: make(http.Header)}
 		r := NewRenderer(settings).
 			WithWriter(tw).
-			WithIDGeneration(true).
+			WithIDGeneration(Yes).
 			WithContext(ctx)
 
 		err := r.Push(tw, Response{Status: StatusSuccessful})
@@ -541,7 +564,6 @@ func TestEncoderErrorHandling(t *testing.T) {
 			WithWriter(tw).
 			WithContentType(ContentTypeXML)
 
-		// Create a value that XML can't encode natively
 		data := struct {
 			Channel chan int `xml:"channel"`
 		}{
@@ -553,13 +575,11 @@ func TestEncoderErrorHandling(t *testing.T) {
 			t.Fatal("Expected an encoding error")
 		}
 
-		// Check if we got an EncoderError
 		var encErr *EncoderError
 		if !errors.As(err, &encErr) {
 			t.Errorf("Expected EncoderError, got %T", err)
 		}
 
-		// Verify we got an XML error response
 		output := tw.Buffer.String()
 		if !strings.Contains(output, "<error>") {
 			t.Errorf("Expected XML error response, got %q", output)
@@ -572,7 +592,6 @@ func TestEncoderErrorHandling(t *testing.T) {
 			WithWriter(tw).
 			WithContentType(ContentTypeJSON)
 
-		// Create a value that JSON can't encode
 		data := struct {
 			Channel chan int `json:"channel"`
 		}{
@@ -584,13 +603,11 @@ func TestEncoderErrorHandling(t *testing.T) {
 			t.Fatal("Expected an encoding error")
 		}
 
-		// Check if we got an EncoderError
 		var encErr *EncoderError
 		if !errors.As(err, &encErr) {
 			t.Errorf("Expected EncoderError, got %T", err)
 		}
 
-		// Verify we got a JSON error response
 		var resp map[string]interface{}
 		if err := json.Unmarshal(tw.Buffer.Bytes(), &resp); err != nil {
 			t.Fatalf("Failed to unmarshal error response: %v", err)
@@ -612,21 +629,18 @@ func TestEncoderErrorHandling(t *testing.T) {
 			WithContentType(ContentTypeJSON).
 			WithSystem(SystemShowBody, sys)
 
-		// Override the start time to control duration
-		r.start = time.Now().Add(-2 * time.Second) // Fixed 2 second duration
+		r.start = time.Now().Add(-2 * time.Second)
 
 		err := r.Push(tw, Response{Status: StatusSuccessful, Message: "test"})
 		if err != nil {
 			t.Fatalf("Push failed: %v", err)
 		}
 
-		// Parse the response
 		var resp Response
 		if err := json.Unmarshal(tw.Buffer.Bytes(), &resp); err != nil {
 			t.Fatalf("Failed to unmarshal response: %v", err)
 		}
 
-		// Verify system metadata
 		if resp.Meta == nil {
 			t.Fatal("Expected meta field with system info")
 		}
@@ -636,16 +650,14 @@ func TestEncoderErrorHandling(t *testing.T) {
 			t.Fatalf("Expected system info as map, got %T", resp.Meta["system"])
 		}
 
-		// Verify fixed fields
 		if system["app"] != "test-app" || system["version"] != "1.0" || system["play"] != true {
 			t.Errorf("System info mismatch: got %+v", system)
 		}
 
-		// Verify duration is present and formatted
 		duration, ok := system["duration"].(string)
 		if !ok {
 			t.Errorf("Expected duration as string, got %T", system["duration"])
-		} else if !strings.HasPrefix(duration, "2.") && duration != "2s" { // Allow for minor variations like 2.00001s
+		} else if !strings.HasPrefix(duration, "2.") && duration != "2s" {
 			t.Errorf("Expected duration around '2s', got %q", duration)
 		}
 	})
@@ -667,12 +679,10 @@ func TestEncoderErrorHandling(t *testing.T) {
 			t.Fatalf("Push failed: %v", err)
 		}
 
-		// Verify headers
 		if tw.Headers.Get("X-test-App") != "test-app" || tw.Headers.Get("X-test-Server") != "localhost" {
 			t.Errorf("Expected system info in headers, got %+v", tw.Headers)
 		}
 
-		// Verify body contains expected system info
 		output := tw.Buffer.String()
 		if !strings.Contains(output, "<App>test-app</App>") ||
 			!strings.Contains(output, "<Server>localhost</Server>") ||
@@ -711,7 +721,6 @@ func TestResponsePoolReset(t *testing.T) {
 	}
 }
 
-// testWriter is a simplified version of TestWriter for these tests
 type testWriter struct {
 	buffer  bytes.Buffer
 	headers http.Header
@@ -733,11 +742,9 @@ func TestSpecificCase(t *testing.T) {
 		WithWriter(tw).
 		WithProtocol(&TCPProtocol{})
 
-	// This should produce: "problems: first, %!v(MISSING)"
 	_ = r.Errorf("problems: %v, %v",
 		errors.New("first"), ErrSkip, errors.New("third"))
 
-	// Check the result
 	var resp Response
 	json.Unmarshal(tw.buffer.Bytes(), &resp)
 
@@ -923,7 +930,7 @@ func TestErrorFilters(t *testing.T) {
 				WithProtocol(&TCPProtocol{})
 
 			if tt.filter != nil {
-				r = r.WithErrorFilters(tt.filter)
+				r = r.WithFilters(tt.filter)
 			}
 
 			err := r.Errorf("test error: %v", tt.err)
@@ -1097,6 +1104,383 @@ func TestFilterErrorsWithErrHidden(t *testing.T) {
 				if errors.Is(err, ErrHidden) {
 					t.Errorf("ErrHidden should be filtered out, but found: %v", err)
 				}
+			}
+		})
+	}
+}
+
+func TestErrorWithNilHandling(t *testing.T) {
+	tests := []struct {
+		name               string
+		message            string
+		errs               []error
+		expectResponse     bool
+		expectedErrorCount int
+	}{
+		{
+			name:               "with nil error only",
+			message:            "A message",
+			errs:               []error{nil},
+			expectResponse:     true,
+			expectedErrorCount: 0,
+		},
+		{
+			name:               "with no errors provided",
+			message:            "Another message",
+			errs:               []error{},
+			expectResponse:     true,
+			expectedErrorCount: 0,
+		},
+		{
+			name:               "with a single real error",
+			message:            "Real error occurred",
+			errs:               []error{errors.New("something went wrong")},
+			expectResponse:     true,
+			expectedErrorCount: 1,
+		},
+		{
+			name:               "with real and nil errors",
+			message:            "Mixed errors",
+			errs:               []error{errors.New("real error"), nil, errors.New("another real error")},
+			expectResponse:     true,
+			expectedErrorCount: 2,
+		},
+		{
+			name:               "with only a skippable error",
+			message:            "This should be skipped",
+			errs:               []error{ErrSkip},
+			expectResponse:     false,
+			expectedErrorCount: 0,
+		},
+		{
+			name:               "with skippable and real errors",
+			message:            "Should show one error",
+			errs:               []error{ErrSkip, errors.New("visible error")},
+			expectResponse:     true,
+			expectedErrorCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			renderer := NewRenderer(Setting{}).WithWriter(w)
+
+			err := renderer.ErrorWith(tt.message, tt.errs...)
+			if err != nil {
+				t.Fatalf("ErrorWith returned an unexpected error: %v", err)
+			}
+
+			if !tt.expectResponse {
+				if w.Body.Len() != 0 {
+					t.Errorf("expected no response, but a response was sent with body: %s", w.Body.String())
+				}
+				return
+			}
+
+			if w.Body.Len() == 0 {
+				t.Fatal("expected a response, but no response was sent")
+			}
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("expected status %d, but got %d", http.StatusBadRequest, w.Code)
+			}
+
+			var resp Response
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to unmarshal response body: %v", err)
+			}
+
+			if resp.Message != tt.message {
+				t.Errorf("expected message %q, but got %q", tt.message, resp.Message)
+			}
+
+			if len(resp.Errors) != tt.expectedErrorCount {
+				t.Errorf("expected %d errors in response, but got %d", tt.expectedErrorCount, len(resp.Errors))
+			}
+		})
+	}
+}
+
+func TestFatalMethods(t *testing.T) {
+	tests := []struct {
+		name                       string
+		testFunc                   func(r *Renderer) error
+		expectResponse             bool
+		expectLog                  bool
+		expectedResponseMessage    string
+		expectedResponseErrorCount int
+		expectedLogFieldsCount     int
+	}{
+		{
+			name:                       "Fatal with a real error",
+			testFunc:                   func(r *Renderer) error { return r.Fatal(errors.New("db connection failed")) },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    defaultFatalMessage,
+			expectedResponseErrorCount: 1,
+			expectedLogFieldsCount:     0,
+		},
+		{
+			name:                       "FatalWith with a real error",
+			testFunc:                   func(r *Renderer) error { return r.FatalWith("failed to load user", errors.New("user not found")) },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    "failed to load user",
+			expectedResponseErrorCount: 1,
+			expectedLogFieldsCount:     0,
+		},
+		{
+			name:                       "Fatalf with a real error",
+			testFunc:                   func(r *Renderer) error { return r.Fatalf("hello : %v", errors.New("test error")) },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    "hello : test error",
+			expectedResponseErrorCount: 1,
+			expectedLogFieldsCount:     0,
+		},
+		{
+			name:                       "Fatal with multiple real errors",
+			testFunc:                   func(r *Renderer) error { return r.Fatal(errors.New("error1"), errors.New("error2")) },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    defaultFatalMessage,
+			expectedResponseErrorCount: 2,
+			expectedLogFieldsCount:     1,
+		},
+		{
+			name:                       "FatalWith with only nil error MUST log and respond",
+			testFunc:                   func(r *Renderer) error { return r.FatalWith("failed to load", nil) },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    "failed to load",
+			expectedResponseErrorCount: 0,
+			expectedLogFieldsCount:     0,
+		},
+		{
+			name:                       "Fatal with no errors MUST log and respond",
+			testFunc:                   func(r *Renderer) error { return r.Fatal() },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    defaultFatalMessage,
+			expectedResponseErrorCount: 0,
+			expectedLogFieldsCount:     0,
+		},
+		{
+			name:                       "FatalWith with no errors MUST log and respond",
+			testFunc:                   func(r *Renderer) error { return r.FatalWith("failed to load") },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    "failed to load",
+			expectedResponseErrorCount: 0,
+			expectedLogFieldsCount:     0,
+		},
+		{
+			name:                       "Fatalf with no error arguments MUST log and respond",
+			testFunc:                   func(r *Renderer) error { return r.Fatalf("hello") },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    "hello",
+			expectedResponseErrorCount: 0,
+			expectedLogFieldsCount:     0,
+		},
+		{
+			name:                       "Fatalf with nil error MUST log and respond",
+			testFunc:                   func(r *Renderer) error { return r.Fatalf("hello : %v", nil) },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    "hello : <nil>",
+			expectedResponseErrorCount: 0,
+			expectedLogFieldsCount:     0,
+		},
+		{
+			name:                   "Fatal with only ErrSkip should not log or respond",
+			testFunc:               func(r *Renderer) error { return r.Fatal(ErrSkip) },
+			expectResponse:         false,
+			expectLog:              false,
+			expectedLogFieldsCount: 0,
+		},
+		{
+			name:                   "FatalWith with only ErrSkip should not log or respond",
+			testFunc:               func(r *Renderer) error { return r.FatalWith("this should be skipped", ErrSkip) },
+			expectResponse:         false,
+			expectLog:              false,
+			expectedLogFieldsCount: 0,
+		},
+		{
+			name:                       "Fatal with only ErrHidden MUST log and respond",
+			testFunc:                   func(r *Renderer) error { return r.Fatal(ErrHidden) },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    defaultFatalMessage,
+			expectedResponseErrorCount: 0,
+			expectedLogFieldsCount:     0,
+		},
+		{
+			name:                       "FatalWith with only ErrHidden MUST log and respond",
+			testFunc:                   func(r *Renderer) error { return r.FatalWith("a hidden error occurred", ErrHidden) },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    "a hidden error occurred",
+			expectedResponseErrorCount: 0,
+			expectedLogFieldsCount:     0,
+		},
+		{
+			name:                       "Fatalf with only ErrHidden MUST log and respond",
+			testFunc:                   func(r *Renderer) error { return r.Fatalf("hidden : %v", ErrHidden) },
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    "hidden : *hidden*",
+			expectedResponseErrorCount: 0,
+			expectedLogFieldsCount:     0,
+		},
+		{
+			name:                   "Fatalf with ErrSkip should not log or respond",
+			testFunc:               func(r *Renderer) error { return r.Fatalf("skipped : %v", ErrSkip) },
+			expectResponse:         false,
+			expectLog:              false,
+			expectedLogFieldsCount: 0,
+		},
+		{
+			name: "Fatalf with mixed errors including ErrSkip",
+			testFunc: func(r *Renderer) error {
+				return r.Fatalf("mixed: %v %v %v", errors.New("real"), ErrSkip, errors.New("another"))
+			},
+			expectResponse:             true,
+			expectLog:                  true,
+			expectedResponseMessage:    "mixed: real %!v(MISSING) another",
+			expectedResponseErrorCount: 2,
+			expectedLogFieldsCount:     1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			testLogger := &TestLogger{}
+			renderer := NewRenderer(Setting{}).WithWriter(w).WithLogger(testLogger)
+
+			err := tt.testFunc(renderer)
+			if err != nil {
+				t.Fatalf("Function returned an unexpected error: %v", err)
+			}
+
+			if !tt.expectResponse {
+				if w.Body.Len() != 0 {
+					t.Errorf("expected NO response, but got body: %s", w.Body.String())
+				}
+			} else {
+				if w.Body.Len() == 0 {
+					t.Fatal("expected a response, but NO response was sent")
+				}
+				if w.Code != http.StatusInternalServerError {
+					t.Errorf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
+				}
+				var resp Response
+				if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("failed to unmarshal response: %v", err)
+				}
+				if resp.Message != tt.expectedResponseMessage {
+					t.Errorf("expected message %q, got %q", tt.expectedResponseMessage, resp.Message)
+				}
+				if len(resp.Errors) != tt.expectedResponseErrorCount {
+					t.Errorf("expected %d errors in response, got %d", tt.expectedResponseErrorCount, len(resp.Errors))
+				}
+			}
+
+			if !tt.expectLog {
+				if len(testLogger.Entries) != 0 {
+					t.Errorf("expected NO log entry, but %d were found", len(testLogger.Entries))
+				}
+			} else {
+				if len(testLogger.Entries) == 0 {
+					t.Fatal("expected a log entry, but NO log was created")
+				}
+				lastLog := testLogger.LastEntry()
+				if lastLog.Level != "fatal" {
+					t.Errorf("expected log level 'fatal', got %q", lastLog.Level)
+				}
+				if lastLog.Err == nil {
+					t.Error("expected a non-nil error in the log entry")
+				}
+				if len(lastLog.Fields) != tt.expectedLogFieldsCount {
+					t.Errorf("expected %d log fields, got %d", tt.expectedLogFieldsCount, len(lastLog.Fields))
+				}
+			}
+		})
+	}
+}
+
+// TestFatalMethods_WithFilterableErrors specifically tests that fatal methods
+// ALWAYS produce a response and that the response body contains the original
+// filterable error for client context.
+func TestFatalMethods_WithFilterableErrors(t *testing.T) {
+	// sql.ErrNoRows is a perfect stand-in for any custom, filterable error.
+	filterableErr := sql.ErrNoRows
+
+	tests := []struct {
+		name     string
+		testFunc func(r *Renderer) error
+	}{
+		{
+			name:     "Fatal with a filterable error",
+			testFunc: func(r *Renderer) error { return r.Fatal(filterableErr) },
+		},
+		{
+			name:     "FatalWith with a filterable error",
+			testFunc: func(r *Renderer) error { return r.FatalWith("failed to query", filterableErr) },
+		},
+		{
+			name:     "Fatalf with a filterable error",
+			testFunc: func(r *Renderer) error { return r.Fatalf("query failed: %v", filterableErr) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			w := httptest.NewRecorder()
+			testLogger := &TestLogger{}
+			renderer := NewRenderer(Setting{}).WithWriter(w).WithLogger(testLogger)
+
+			// Act
+			err := tt.testFunc(renderer)
+			if err != nil {
+				t.Fatalf("Function returned an unexpected error: %v", err)
+			}
+
+			// Assert Response: A response MUST be sent.
+			if w.Body.Len() == 0 {
+				t.Fatal("expected a fatal response, but NO response was sent")
+			}
+			if w.Code != http.StatusInternalServerError {
+				t.Errorf("expected status %d, got %d", http.StatusInternalServerError, w.Code)
+			}
+			var resp Response
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+
+			// The original error MUST be in the response body.
+			if len(resp.Errors) != 1 {
+				t.Fatalf("expected 1 error in response body, got %d", len(resp.Errors))
+			}
+			if resp.Errors[0].Error() != filterableErr.Error() {
+				t.Errorf("expected error %q in response, got %q", filterableErr.Error(), resp.Errors[0].Error())
+			}
+
+			// Assert Logging: The logger MUST be called.
+			if len(testLogger.Entries) == 0 {
+				t.Fatal("expected a log entry, but NO log was created")
+			}
+			lastLog := testLogger.LastEntry()
+			if lastLog.Level != "fatal" {
+				t.Errorf("expected log level 'fatal', got %q", lastLog.Level)
+			}
+			// The log entry's primary error should be a generic message since the real error was filtered
+			// from the logging perspective.
+			if !strings.Contains(lastLog.Err.Error(), "fatal error occurred") && !strings.Contains(lastLog.Err.Error(), "failed to query") && !strings.Contains(lastLog.Err.Error(), "query failed") {
+				t.Errorf("expected log message to contain the fatal message, got %q", lastLog.Err.Error())
 			}
 		})
 	}

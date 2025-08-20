@@ -39,6 +39,14 @@ const (
 	HeaderNamePlay      = "Play"
 )
 
+// Operation Status Constants
+// Used to indicate the success or failure of operations
+const (
+	Unknown = 0  // Operation default
+	No      = -1 // Operation failed
+	Yes     = 1  // Operation succeeded
+)
+
 // -----------------------------------------------------------------------------
 // System Metadata and Renderer Settings
 // -----------------------------------------------------------------------------
@@ -62,7 +70,19 @@ const (
 // Used when no custom error message is provided in Renderer methods.
 // Ensures consistent error messaging across responses.
 const (
-	defaultErrorMessage = "An error occurred"
+	defaultErrorMessage = "an error occurred"
+	defaultFatalMessage = "a fatal error occurred"
+
+	fieldMessage = "message"
+	fieldID      = "id"
+	fieldTags    = "tags"
+	fieldSource  = "source"
+	fieldFile    = "file"
+	fieldLine    = "line"
+	fieldFunc    = "func"
+	fieldError   = "error"
+	fieldErrors  = "errors"
+	fieldMeta    = "meta"
 )
 
 // Common errors for protocol handling.

@@ -1,6 +1,7 @@
 package beam
 
 import (
+	"errors"
 	"net/http"
 )
 
@@ -62,4 +63,45 @@ func cloneSlice(s []string) []string {
 	newSlice := make([]string, len(s))
 	copy(newSlice, s)
 	return newSlice
+}
+
+func checkErrors(errs ...error) (hasNonNilError bool, containsHidden bool) {
+	for _, err := range errs {
+		if err != nil {
+			hasNonNilError = true
+		}
+		if errors.Is(err, ErrHidden) {
+			containsHidden = true
+		}
+	}
+	return
+}
+
+func cleanErrorSlice(errs []error) []error {
+	if errs == nil {
+		return nil
+	}
+	cleaned := make([]error, 0, len(errs))
+	for _, err := range errs {
+		if err != nil {
+			cleaned = append(cleaned, err)
+		}
+	}
+	return cleaned
+}
+
+// stripHiddenAndNilErrors prepares the error slice for the final client response.
+// It removes only truly hidden errors and nils, but preserves filterable
+// errors like sql.ErrNoRows for context.
+func stripHiddenAndNilErrors(errs []error) []error {
+	if errs == nil {
+		return nil
+	}
+	responseErrors := make([]error, 0, len(errs))
+	for _, err := range errs {
+		if err != nil && !errors.Is(err, ErrHidden) {
+			responseErrors = append(responseErrors, err)
+		}
+	}
+	return responseErrors
 }

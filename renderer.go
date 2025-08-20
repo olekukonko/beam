@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/HugoSmits86/nativewebp"
@@ -43,8 +44,13 @@ type Renderer struct {
 	writer       Writer              // Default writer
 	httpWriter   http.ResponseWriter // Concrete HTTP writer, if applicable
 	finalizer    Finalizer           // Error finalizer
-	generateID   bool                // Enable automatic ID generation
 	system       System              // System metadata configuration
+	mu           sync.RWMutex
+
+	showSystem SystemShow
+
+	generateID State // Enable automatic ID generation
+	showError  State
 }
 
 // NewRenderer creates a new Renderer with the provided settings and default content type.
@@ -71,7 +77,6 @@ func NewRenderer(s Setting) *Renderer {
 		errorFilters: []func(error) bool{
 			func(err error) bool { return errors.Is(err, sql.ErrNoRows) },
 			func(err error) bool { return errors.Is(err, ErrSkip) },
-			func(err error) bool { return errors.Is(err, ErrHidden) },
 		},
 		finalizer: func(w Writer, err error) { // Default finalizer for HTTP
 			if err != nil {
@@ -80,9 +85,9 @@ func NewRenderer(s Setting) *Renderer {
 				}
 			}
 		},
-		system: System{
-			show: SystemShowNone, // Off by default
-		},
+		showError:  Yes,
+		showSystem: No,
+		generateID: No,
 	}
 	// Ensure EnableHeaders defaults to true if not set
 	if !r.s.EnableHeaders {
@@ -90,23 +95,6 @@ func NewRenderer(s Setting) *Renderer {
 	}
 	return r
 }
-
-// clone creates a shallow copy of the Renderer with deep copies of mutable fields.
-// Ensures immutability for chained method calls by copying meta, tags, headers, and callbacks.
-// Returns a new Renderer instance for thread-safe modifications.
-func (r *Renderer) clone() *Renderer {
-	newRenderer := *r
-	newRenderer.meta = cloneMap(r.meta)
-	newRenderer.tags = cloneSlice(r.tags)
-	newRenderer.header = cloneHeader(r.header)
-	newRenderer.callbacks = r.callbacks.Clone()
-	newRenderer.errorFilters = append([]func(error) bool{}, r.errorFilters...)
-	return &newRenderer
-}
-
-// -----------------------------------------------------------------------------
-// Renderer Configuration Methods
-// -----------------------------------------------------------------------------
 
 // WithWriter sets the default writer for the Renderer.
 // Assigns the provided Writer and sets httpWriter if applicable.
@@ -120,21 +108,12 @@ func (r *Renderer) WithWriter(w Writer) *Renderer {
 	return nr
 }
 
-// WithErrorFilters adds additional error filters to the Renderer.
+// WithFilters adds additional error filters to the Renderer.
 // Appends the provided filter functions to the errorFilters slice.
 // Returns a new Renderer with updated error filters.
-func (r *Renderer) WithErrorFilters(filters ...func(error) bool) *Renderer {
+func (r *Renderer) WithFilters(filters ...func(error) bool) *Renderer {
 	nr := r.clone()
 	nr.errorFilters = append(nr.errorFilters, filters...)
-	return nr
-}
-
-// SetLogger sets the Renderer's logger (deprecated; use WithLogger).
-// Updates the logger field for error logging in a new Renderer copy.
-// Returns a new Renderer with the updated logger.
-func (r *Renderer) SetLogger(l Logger) *Renderer {
-	nr := r.clone()
-	nr.logger = l
 	return nr
 }
 
@@ -171,14 +150,14 @@ func (r *Renderer) WithFinalizer(f Finalizer) *Renderer {
 func (r *Renderer) WithSystem(show SystemShow, sys System) *Renderer {
 	nr := r.clone()
 	nr.system = sys
-	nr.system.show = show
+	nr.showSystem = show
 	return nr
 }
 
 // WithIDGeneration enables or disables automatic ID generation.
 // Toggles the generateID field in a new Renderer copy.
 // Returns a new Renderer with the updated ID generation setting.
-func (r *Renderer) WithIDGeneration(enabled bool) *Renderer {
+func (r *Renderer) WithIDGeneration(enabled State) *Renderer {
 	nr := r.clone()
 	nr.generateID = enabled
 	return nr
@@ -259,25 +238,6 @@ func (r *Renderer) WithCallback(cb ...func(data CallbackData)) *Renderer {
 	return nr
 }
 
-// SetAction adds an action to the Renderer's response.
-// Appends a new Action with the provided name and description to meta.
-// Returns a new Renderer with the updated actions.
-func (r *Renderer) SetAction(name, description string) *Renderer {
-	nr := r.clone()
-	if nr.meta == nil {
-		nr.meta = make(map[string]interface{})
-	}
-	if _, ok := nr.meta["actions"]; !ok {
-		nr.meta["actions"] = []Action{}
-	}
-	actions := nr.meta["actions"].([]Action)
-	nr.meta["actions"] = append(actions, Action{
-		Name:        name,
-		Description: description,
-	})
-	return nr
-}
-
 // WithAction adds fully specified actions to the Renderer.
 // Appends the provided Action structs to the meta actions list.
 // Returns a new Renderer with the updated actions.
@@ -306,10 +266,29 @@ func (r *Renderer) WithActions(actions []Action) *Renderer {
 	return nr
 }
 
-// FilterError adds error filters to the Renderer.
+// SetAction adds an action to the Renderer's response.
+// Appends a new Action with the provided name and description to meta.
+// Returns a new Renderer with the updated actions.
+func (r *Renderer) WithSingle(name, description string) *Renderer {
+	nr := r.clone()
+	if nr.meta == nil {
+		nr.meta = make(map[string]interface{})
+	}
+	if _, ok := nr.meta["actions"]; !ok {
+		nr.meta["actions"] = []Action{}
+	}
+	actions := nr.meta["actions"].([]Action)
+	nr.meta["actions"] = append(actions, Action{
+		Name:        name,
+		Description: description,
+	})
+	return nr
+}
+
+// WithFilter adds error filters to the Renderer.
 // Appends the provided error filter functions to errorFilters.
 // Returns a new Renderer with the updated filters.
-func (r *Renderer) FilterError(filters ...func(error) bool) *Renderer {
+func (r *Renderer) WithFilter(filters ...func(error) bool) *Renderer {
 	nr := r.clone()
 	nr.errorFilters = append(nr.errorFilters, filters...)
 	return nr
@@ -342,90 +321,23 @@ func (r *Renderer) WithProtocol(p Protocol) *Renderer {
 	return nr
 }
 
-// Show updates the system metadata display configuration.
+// WithProtocol sets the protocol handler for the Renderer.
+// Assigns the provided Protocol interface for response output.
+// Returns a new Renderer with the updated protocol handler.
+func (r *Renderer) WithShowSystem(show SystemShow) *Renderer {
+	nr := r.clone()
+	nr.showSystem = show
+	return nr
+}
+
+// ShowSystem updates the system metadata display configuration.
 // Sets the SystemShow mode for controlling metadata output.
 // Returns nil as no error conditions are currently defined.
-func (r *Renderer) Show(show SystemShow) error {
-	r.system.show = show
+func (r *Renderer) WithShowError(show State) error {
+	r.mu.RUnlock()
+	defer r.mu.RLock()
+	r.showError = show
 	return nil
-}
-
-// applyCommonHeaders builds and applies common headers to the writer.
-// Sets headers including content type, system metadata, and presets.
-// Returns an error if the writer or protocol is nil or header application fails.
-func (r *Renderer) applyCommonHeaders(w Writer, contentType string) error {
-	if w == nil {
-		return errNilWriter
-	}
-	if r.protocol == nil {
-		return errNilProtocol
-	}
-
-	// Build common headers with a prefix based on the application name.
-	setHeader := func(key, value string) {
-		prefix := HeaderPrefix
-		if r.s.Name != Empty {
-			prefix = "X-" + r.s.Name
-		}
-		r.header.Set(prefix+"-"+key, value)
-	}
-
-	if r.s.EnableHeaders {
-		r.header.Set(HeaderContentType, contentType)
-		// Optionally include system metadata in headers.
-		if r.system.show == SystemShowHeaders || r.system.show == SystemShowBoth {
-			setHeader(HeaderNameDuration, time.Since(r.start).String())
-			setHeader(HeaderNameTimestamp, strconv.FormatInt(time.Now().Unix(), 10))
-			if r.system.App != Empty {
-				setHeader(HeaderNameApp, r.system.App)
-			}
-			if r.system.Server != Empty {
-				setHeader(HeaderNameServer, r.system.Server)
-			}
-			if r.system.Version != Empty {
-				setHeader(HeaderNameVersion, r.system.Version)
-			}
-			if r.system.Build != Empty {
-				setHeader(HeaderNameBuild, r.system.Build)
-			}
-			setHeader(HeaderNamePlay, strconv.FormatBool(r.system.Play))
-		}
-		// Apply preset headers if available.
-		if r.s.Presets != nil {
-			if preset, ok := r.s.Presets[contentType]; ok && preset.Headers != nil {
-				for key, values := range preset.Headers {
-					for _, value := range values {
-						r.header.Add(key, value)
-					}
-				}
-			}
-		}
-		// If httpWriter is set, use it directly to avoid type assertion.
-		if r.httpWriter != nil {
-			for key, values := range r.header {
-				for _, value := range values {
-					r.httpWriter.Header().Add(key, value)
-				}
-			}
-		} else if hw, ok := w.(http.ResponseWriter); ok {
-			for key, values := range r.header {
-				for _, value := range values {
-					hw.Header().Add(key, value)
-				}
-			}
-		}
-	}
-	return r.protocol.ApplyHeaders(w, r.code)
-}
-
-// triggerCallbacks invokes registered callbacks and logs errors if needed.
-// Triggers callbacks with the provided ID, status, message, and error.
-// Logs errors via the Renderer’s logger if present; no return value.
-func (r *Renderer) triggerCallbacks(id, status, msg string, err error) {
-	r.callbacks.Trigger(id, status, msg, err)
-	if err != nil && r.logger != nil {
-		r.logger.Log(err)
-	}
 }
 
 // Push sends a structured Response using the Renderer’s configuration.
@@ -455,7 +367,7 @@ func (r *Renderer) Push(w Writer, d Response) error {
 		return errNoWriter
 	}
 
-	if nr.generateID && nr.id == Empty {
+	if nr.generateID.Enabled() && nr.id == Empty {
 		var buf [20]byte
 		n := len(strconv.AppendInt(buf[:0], time.Now().UnixNano(), 10))
 		nr.id = "req-" + string(buf[:n])
@@ -493,7 +405,7 @@ func (r *Renderer) Push(w Writer, d Response) error {
 	}
 
 	// If system display is enabled, include system info in meta.
-	if nr.system.show == SystemShowBody || nr.system.show == SystemShowBoth {
+	if nr.showSystem == SystemShowBody || nr.showSystem == SystemShowBoth {
 		if resp.Meta == nil {
 			resp.Meta = make(map[string]interface{})
 		}
@@ -574,7 +486,7 @@ func (r *Renderer) Raw(data interface{}) error {
 	if w == nil {
 		return errNoWriter
 	}
-	if nr.generateID && nr.id == Empty {
+	if nr.generateID.Enabled() && nr.id == Empty {
 		var buf [20]byte
 		n := len(strconv.AppendInt(buf[:0], time.Now().UnixNano(), 10))
 		nr.id = "req-" + string(buf[:n])
@@ -626,7 +538,7 @@ func (r *Renderer) Stream(callback func(*Renderer) (interface{}, error)) error {
 	if w == nil {
 		return errNoWriter
 	}
-	if nr.generateID && nr.id == Empty {
+	if nr.generateID.Enabled() && nr.id == Empty {
 		var buf [20]byte
 		n := len(strconv.AppendInt(buf[:0], time.Now().UnixNano(), 10))
 		nr.id = "req-" + string(buf[:n])
@@ -721,7 +633,7 @@ func (r *Renderer) Binary(contentType string, data []byte) error {
 	if w == nil {
 		return errNoWriter
 	}
-	if nr.generateID && nr.id == Empty {
+	if nr.generateID.Enabled() && nr.id == Empty {
 		var buf [20]byte
 		n := len(strconv.AppendInt(buf[:0], time.Now().UnixNano(), 10))
 		nr.id = "req-" + string(buf[:n])
@@ -763,7 +675,7 @@ func (r *Renderer) Image(contentType string, img image.Image) error {
 	if w == nil {
 		return errNoWriter
 	}
-	if nr.generateID && nr.id == Empty {
+	if nr.generateID.Enabled() && nr.id == Empty {
 		var buf [20]byte
 		n := len(strconv.AppendInt(buf[:0], time.Now().UnixNano(), 10))
 		nr.id = "req-" + string(buf[:n])
@@ -823,244 +735,6 @@ func (r *Renderer) Image(contentType string, img image.Image) error {
 	return nr.Binary(contentType, buf.Bytes())
 }
 
-// Msg sends a successful response with a message.
-// Sends a Response with StatusSuccessful and the provided message.
-// Returns an error if the writer is unset or sending fails.
-func (r *Renderer) Msg(msg string) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-	return r.WithStatus(http.StatusOK).Push(r.writer, Response{
-		Status:  StatusSuccessful,
-		Message: msg,
-	})
-}
-
-// Info sends a successful response with a message and info data.
-// Sends a Response with StatusSuccessful, message, and optional info.
-// Returns an error if the writer is unset or sending fails.
-func (r *Renderer) Info(msg string, info interface{}) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-	return r.WithStatus(http.StatusOK).Push(r.writer, Response{
-		Status:  StatusSuccessful,
-		Message: msg,
-		Info:    info,
-	})
-}
-
-// Data sends a successful response with a message and data items.
-// Sends a Response with StatusSuccessful, message, and data slice.
-// Returns an error if the writer is unset or sending fails.
-func (r *Renderer) Data(msg string, data interface{}) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-	return r.WithStatus(http.StatusOK).Push(r.writer, Response{
-		Status:  StatusSuccessful,
-		Message: msg,
-		Data:    data,
-	})
-}
-
-// Response sends a successful response with message, info, and data.
-// Sends a Response with StatusSuccessful, message, info, and data.
-// Returns an error if the writer is unset or sending fails.
-func (r *Renderer) Response(msg string, info interface{}, data interface{}) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-	return r.WithStatus(http.StatusOK).Push(r.writer, Response{
-		Status:  StatusSuccessful,
-		Message: msg,
-		Info:    info,
-		Data:    data,
-	})
-}
-
-// Pending sends a pending response with a message and info data.
-// Sends a Response with StatusPending and the provided message/info.
-// Returns an error if the writer is unset or sending fails.
-func (r *Renderer) Pending(msg string, info interface{}) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-	return r.WithStatus(http.StatusAccepted).Push(r.writer, Response{
-		Status:  StatusPending,
-		Message: msg,
-		Info:    info,
-	})
-}
-
-// Titled sends a successful response with a title, message, and info.
-// Sends a Response with StatusSuccessful, title, message, and info.
-// Returns an error if the writer is unset or sending fails.
-func (r *Renderer) Titled(title, msg string, info interface{}) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-	return r.WithStatus(http.StatusOK).Push(r.writer, Response{
-		Status:  StatusSuccessful,
-		Title:   title,
-		Message: msg,
-		Info:    info,
-	})
-}
-
-// Error sends an error response with a default summary message.
-// Sends a Response with StatusError and filtered errors, if any.
-// Returns an error if the writer is unset or sending fails; skips if all errors filtered.
-func (r *Renderer) Error(errs ...error) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-
-	// First, check if any of the provided errors are ErrHidden.
-	containsHidden := false
-	if len(errs) > 0 {
-		for _, err := range errs {
-			if errors.Is(err, ErrHidden) {
-				containsHidden = true
-				break
-			}
-		}
-	}
-
-	filteredErrs := r.filterErrors(errs)
-
-	// If all errors were filtered out AND none of them were hidden, we can skip the response.
-	if len(errs) > 0 && len(filteredErrs) == 0 && !containsHidden {
-		return nil
-	}
-
-	resp := getResponse()
-	defer putResponse(resp)
-	resp.Status = StatusError
-	resp.Errors = filteredErrs // Use the filtered list (will be empty for ErrHidden)
-	resp.Message = defaultErrorMessage
-
-	return r.WithStatus(http.StatusBadRequest).Push(r.writer, *resp)
-}
-
-// ErrorWith sends an error response with a custom message and errors.
-// Sends a Response with StatusError, custom message, and filtered errors.
-// Returns an error if the writer is unset or sending fails; skips if all errors filtered.
-func (r *Renderer) ErrorWith(message string, errs ...error) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-
-	containsHidden := false
-	if len(errs) > 0 {
-		for _, err := range errs {
-			if errors.Is(err, ErrHidden) {
-				containsHidden = true
-				break
-			}
-		}
-	}
-
-	filteredErrs := r.filterErrors(errs)
-
-	// If all errors were filtered out AND none of them were hidden, we can skip the response.
-	if len(errs) > 0 && len(filteredErrs) == 0 && !containsHidden {
-		return nil
-	}
-
-	resp := getResponse()
-	defer putResponse(resp)
-	resp.Status = StatusError
-	resp.Errors = filteredErrs
-	resp.Message = message
-
-	return r.WithStatus(http.StatusBadRequest).Push(r.writer, *resp)
-}
-
-// Errorf sends an error response with a formatted message and errors.
-// Formats the message with provided args, filtering errors for the response.
-// Returns an error if the writer is unset or sending fails; skips if all errors filtered.
-func (r *Renderer) Errorf(format string, args ...interface{}) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-
-	// 1. Collect all arguments that are errors into a list.
-	allErrorsFromArgs := Any2Error(args...)
-
-	// 2. Create the final, filtered list of errors for the JSON 'errors' field.
-	jsonErrorList := r.filterErrors(allErrorsFromArgs)
-
-	// 3. Decide if we should skip sending a response entirely.
-	containsHidden := false
-	for _, err := range allErrorsFromArgs {
-		if errors.Is(err, ErrHidden) {
-			containsHidden = true
-			break
-		}
-	}
-	if len(allErrorsFromArgs) > 0 && len(jsonErrorList) == 0 && !containsHidden {
-		return nil // All errors were skippable (like ErrSkip), so send nothing.
-	}
-
-	// 4. Build the separate argument list for the formatted "message" string,
-	// respecting the number of verbs in the format string.
-	verbCount := strings.Count(format, "%") - (strings.Count(format, "%%") * 2)
-	messageFormatArgs := []interface{}{}
-	argsConsumed := 0
-
-	for i := 0; i < verbCount && argsConsumed < len(args); {
-		arg := args[argsConsumed]
-		argsConsumed++
-
-		err, isErr := arg.(error)
-		if !isErr {
-			messageFormatArgs = append(messageFormatArgs, arg)
-			i++ // This non-error argument corresponds to a verb.
-			continue
-		}
-
-		// The argument is an error. Check if it's skippable.
-		isSkippable := false
-		for _, filter := range r.errorFilters {
-			// The ErrHidden filter doesn't make an error "skippable" from the format string.
-			if errors.Is(err, ErrHidden) {
-				continue
-			}
-			if filter(err) {
-				isSkippable = true
-				break
-			}
-		}
-
-		if isSkippable {
-			// It's a skippable error like ErrSkip. We consume the verb (i++) but provide
-			// no argument, forcing fmt.Sprintf to print "%!v(MISSING)".
-			i++
-			continue
-		}
-
-		// It's not skippable. Check if it's hidden or visible.
-		if errors.Is(err, ErrHidden) {
-			messageFormatArgs = append(messageFormatArgs, "*hidden*")
-		} else {
-			messageFormatArgs = append(messageFormatArgs, err)
-		}
-		i++ // This error argument corresponds to a verb.
-	}
-
-	// 5. Build and send the response.
-	resp := getResponse()
-	defer putResponse(resp)
-	resp.Status = StatusError
-	resp.Errors = jsonErrorList
-
-	format = strings.ReplaceAll(format, "%w", "%v")
-	resp.Message = fmt.Sprintf(format, messageFormatArgs...)
-
-	return r.WithStatus(http.StatusBadRequest).Push(r.writer, *resp)
-}
-
 // Warning sends a warning response with a default message and errors.
 // Sends a Response with StatusWarning and filtered errors, if any.
 // Returns an error if the writer is unset or sending fails; skips if all errors filtered.
@@ -1118,72 +792,6 @@ func (r *Renderer) Warningf(format string, args ...interface{}) error {
 	return r.WithStatus(http.StatusBadRequest).Push(r.writer, *resp)
 }
 
-// Fatal sends a fatal error response and logs the errors.
-// Sends a Response with StatusFatal, filtered errors, and logs if applicable.
-// Returns an error if the writer is unset or sending fails; skips if all errors filtered.
-func (r *Renderer) Fatal(errs ...error) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-
-	filteredErrs := r.filterErrors(errs)
-	if len(filteredErrs) == 0 && len(errs) > 0 {
-		return nil
-	}
-
-	resp := getResponse()
-	defer putResponse(resp)
-	resp.Status = StatusFatal
-	resp.Errors = filteredErrs
-	resp.Message = "A fatal error occurred"
-
-	err := r.WithStatus(http.StatusInternalServerError).WithTag(StatusFatal).Push(r.writer, *resp)
-
-	if err == nil && r.logger != nil && len(filteredErrs) > 0 {
-		r.logger.Log(errors.Join(filteredErrs...))
-	}
-	return err
-}
-
-// Fatalf sends a fatal error response with a formatted message.
-// Formats the message with args, sends StatusFatal, and logs filtered errors.
-// Returns an error if the writer is unset or sending fails; skips if all errors filtered.
-func (r *Renderer) Fatalf(format string, args ...interface{}) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-
-	errorList := Any2Error(args...)
-	filteredErrs := r.filterErrors(errorList)
-	if len(errorList) > 0 && len(filteredErrs) == 0 {
-		return nil
-	}
-
-	formatArgs := make([]interface{}, len(args))
-	for i, arg := range args {
-		formatArgs[i] = arg
-	}
-
-	resp := getResponse()
-	defer putResponse(resp)
-	resp.Status = StatusFatal
-	resp.Errors = filteredErrs
-
-	format = strings.ReplaceAll(format, "%w", "%v")
-	if len(formatArgs) > 0 {
-		resp.Message = fmt.Sprintf(format, formatArgs...)
-	} else {
-		resp.Message = format
-	}
-
-	err := r.WithStatus(http.StatusInternalServerError).WithTag(StatusFatal).Push(r.writer, *resp)
-
-	if err == nil && r.logger != nil && len(filteredErrs) > 0 {
-		r.logger.Log(errors.Join(filteredErrs...))
-	}
-	return err
-}
-
 // Log logs an error if not filtered and a logger is present.
 // Applies error filters and logs the error via the Renderer’s logger.
 // No return value; performs logging as a side effect.
@@ -1197,7 +805,7 @@ func (r *Renderer) Log(err error) {
 		}
 	}
 	if r.logger != nil {
-		r.logger.Log(err)
+		r.logger.Error(err)
 	}
 }
 
@@ -1231,9 +839,9 @@ func (r *Renderer) Logf(format string, args ...interface{}) {
 	// Log the formatted message
 	if len(filteredArgs) > 0 {
 		msg := fmt.Sprintf(format, filteredArgs...)
-		r.logger.Log(errors.New(msg)) // Assuming logger accepts strings
+		r.logger.Error(errors.New(msg)) // Assuming logger accepts strings
 	} else {
-		r.logger.Log(errors.New(format))
+		r.logger.Error(errors.New(format))
 	}
 }
 
@@ -1344,33 +952,95 @@ func (r *Renderer) Form(req *http.Request, v interface{}) error {
 	return r.Request(req, v)
 }
 
-// filterErrors applies the Renderer’s filters to a slice of errors.
-// Filters out errors matching ErrSkip, ErrHidden, or other filters.
-// Returns a slice of errors that pass the filters; nil if empty or all filtered.
-func (r *Renderer) filterErrors(errs []error) []error {
-	if len(errs) == 0 {
-		return nil
+// private
+
+// clone creates a shallow copy of the Renderer with deep copies of mutable fields.
+// Ensures immutability for chained method calls by copying meta, tags, headers, and callbacks.
+// Returns a new Renderer instance for thread-safe modifications.
+func (r *Renderer) clone() *Renderer {
+	newRenderer := *r
+	newRenderer.meta = cloneMap(r.meta)
+	newRenderer.tags = cloneSlice(r.tags)
+	newRenderer.header = cloneHeader(r.header)
+	newRenderer.callbacks = r.callbacks.Clone()
+	newRenderer.errorFilters = append([]func(error) bool{}, r.errorFilters...)
+	return &newRenderer
+}
+
+// applyCommonHeaders builds and applies common headers to the writer.
+// Sets headers including content type, system metadata, and presets.
+// Returns an error if the writer or protocol is nil or header application fails.
+func (r *Renderer) applyCommonHeaders(w Writer, contentType string) error {
+	if w == nil {
+		return errNilWriter
 	}
-	filtered := make([]error, 0, len(errs))
-	for _, err := range errs {
-		if err == nil {
-			continue
+	if r.protocol == nil {
+		return errNilProtocol
+	}
+
+	// Build common headers with a prefix based on the application name.
+	setHeader := func(key, value string) {
+		prefix := HeaderPrefix
+		if r.s.Name != Empty {
+			prefix = "X-" + r.s.Name
 		}
-		include := true
-		for _, filter := range r.errorFilters {
-			if filter(err) {
-				include = false
-				break
+		r.header.Set(prefix+"-"+key, value)
+	}
+
+	if r.s.EnableHeaders {
+		r.header.Set(HeaderContentType, contentType)
+		// Optionally include system metadata in headers.
+		if r.showSystem == SystemShowHeaders || r.showSystem == SystemShowBoth {
+			setHeader(HeaderNameDuration, time.Since(r.start).String())
+			setHeader(HeaderNameTimestamp, strconv.FormatInt(time.Now().Unix(), 10))
+			if r.system.App != Empty {
+				setHeader(HeaderNameApp, r.system.App)
 			}
-			// Also check for wrapped ErrHidden
-			if errors.Is(err, ErrHidden) {
-				include = false
-				break
+			if r.system.Server != Empty {
+				setHeader(HeaderNameServer, r.system.Server)
+			}
+			if r.system.Version != Empty {
+				setHeader(HeaderNameVersion, r.system.Version)
+			}
+			if r.system.Build != Empty {
+				setHeader(HeaderNameBuild, r.system.Build)
+			}
+			setHeader(HeaderNamePlay, strconv.FormatBool(r.system.Play))
+		}
+		// Apply preset headers if available.
+		if r.s.Presets != nil {
+			if preset, ok := r.s.Presets[contentType]; ok && preset.Headers != nil {
+				for key, values := range preset.Headers {
+					for _, value := range values {
+						r.header.Add(key, value)
+					}
+				}
 			}
 		}
-		if include {
-			filtered = append(filtered, err)
+		// If httpWriter is set, use it directly to avoid type assertion.
+		if r.httpWriter != nil {
+			for key, values := range r.header {
+				for _, value := range values {
+					r.httpWriter.Header().Add(key, value)
+				}
+			}
+		} else if hw, ok := w.(http.ResponseWriter); ok {
+			for key, values := range r.header {
+				for _, value := range values {
+					hw.Header().Add(key, value)
+				}
+			}
 		}
 	}
-	return filtered
+	return r.protocol.ApplyHeaders(w, r.code)
+}
+
+// triggerCallbacks invokes registered callbacks and logs errors if needed.
+// Triggers callbacks with the provided ID, status, message, and error.
+// Logs errors via the Renderer’s logger if present; no return value.
+func (r *Renderer) triggerCallbacks(id, status, msg string, err error) {
+	r.callbacks.Trigger(id, status, msg, err)
+	if err != nil && r.logger != nil {
+		r.logger.Error(err)
+	}
 }
