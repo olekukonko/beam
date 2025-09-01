@@ -12,6 +12,7 @@ import (
 	"image/png"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ type Renderer struct {
 	code         int
 	meta         map[string]interface{}
 	tags         []string
+	actions      []Action
 	id           string
 	title        string
 	start        time.Time
@@ -38,8 +40,8 @@ type Renderer struct {
 	encoders     *EncoderRegistry
 	protocol     *ProtocolHandler
 	callbacks    *CallbackManager
-	contentType  string              // Current content type (e.g., "application/json")
-	errorFilters []func(error) bool  // Renderer-level error filters
+	contentType  string // Current content type (e.g., "application/json")
+	errorFilters ErrorFilterSet
 	logger       Logger              // Optional logger
 	writer       Writer              // Default writer
 	httpWriter   http.ResponseWriter // Concrete HTTP writer, if applicable
@@ -69,14 +71,27 @@ func NewRenderer(s Setting) *Renderer {
 		code:        0, // Status code set by methods as needed
 		meta:        make(map[string]interface{}),
 		tags:        make([]string, 0),
+		actions:     make([]Action, 0),
 		header:      make(http.Header),
 		encoders:    NewEncoderRegistry(),
 		protocol:    NewProtocolHandler(&HTTPProtocol{}),
 		callbacks:   NewCallbackManager(),
 		start:       time.Now(),
-		errorFilters: []func(error) bool{
-			func(err error) bool { return errors.Is(err, sql.ErrNoRows) },
-			func(err error) bool { return errors.Is(err, ErrSkip) },
+		errorFilters: ErrorFilterSet{
+			Skip: []func(error) bool{
+				func(err error) bool { return errors.Is(err, ErrSkip) },
+			},
+			Redact: []func(error) bool{
+				func(err error) bool { return errors.Is(err, ErrHidden) },
+			},
+			Convert: []func(error) error{
+				func(err error) error {
+					if errors.Is(err, sql.ErrNoRows) {
+						return ToNormal(err)
+					}
+					return err
+				},
+			},
 		},
 		finalizer: func(w Writer, err error) { // Default finalizer for HTTP
 			if err != nil {
@@ -108,12 +123,24 @@ func (r *Renderer) WithWriter(w Writer) *Renderer {
 	return nr
 }
 
-// WithFilters adds additional error filters to the Renderer.
-// Appends the provided filter functions to the errorFilters slice.
-// Returns a new Renderer with updated error filters.
-func (r *Renderer) WithFilters(filters ...func(error) bool) *Renderer {
+// WithSkipFilter adds filters that cause errors to be omitted from non-fatal responses.
+func (r *Renderer) WithSkipFilter(filters ...func(error) bool) *Renderer {
 	nr := r.clone()
-	nr.errorFilters = append(nr.errorFilters, filters...)
+	nr.errorFilters.Skip = append(nr.errorFilters.Skip, filters...)
+	return nr
+}
+
+// WithRedactFilter adds filters that cause error messages to be masked in responses.
+func (r *Renderer) WithRedactFilter(filters ...func(error) bool) *Renderer {
+	nr := r.clone()
+	nr.errorFilters.Redact = append(nr.errorFilters.Redact, filters...)
+	return nr
+}
+
+// WithConvertFilter adds filters that can transform an error, e.g., to change its severity.
+func (r *Renderer) WithConvertFilter(filters ...func(error) error) *Renderer {
+	nr := r.clone()
+	nr.errorFilters.Convert = append(nr.errorFilters.Convert, filters...)
 	return nr
 }
 
@@ -202,6 +229,31 @@ func (r *Renderer) WithMeta(key string, value interface{}) *Renderer {
 	return nr
 }
 
+// WithMetaKV adds multiple key-value pairs to the meta map in a variadic manner.
+// Expects arguments in pairs: key1 (string), value1 (interface{}), key2, value2, etc.
+// Skips invalid pairs where key is not a string.
+// Returns a new Renderer with the updated metadata.
+func (r *Renderer) WithMetaKV(kvs ...interface{}) *Renderer {
+	if len(kvs)%2 != 0 {
+		// Optionally log or handle odd number of arguments; here we proceed but skip the last if odd.
+	}
+	nr := r.clone()
+	if nr.meta == nil {
+		nr.meta = make(map[string]interface{})
+	}
+	for i := 0; i < len(kvs); i += 2 {
+		key, ok := kvs[i].(string)
+		if !ok {
+			continue // Skip invalid key
+		}
+		if i+1 < len(kvs) {
+			val := kvs[i+1]
+			nr.meta[key] = val
+		}
+	}
+	return nr
+}
+
 // WithTag adds tags to the Renderer.
 // Appends the provided tags to the tags slice.
 // Returns a new Renderer with the updated tags.
@@ -239,46 +291,29 @@ func (r *Renderer) WithCallback(cb ...func(data CallbackData)) *Renderer {
 }
 
 // WithAction adds fully specified actions to the Renderer.
-// Appends the provided Action structs to the meta actions list.
+// Appends the provided Action structs to the actions slice.
 // Returns a new Renderer with the updated actions.
 func (r *Renderer) WithAction(actions ...Action) *Renderer {
 	nr := r.clone()
-	if nr.meta == nil {
-		nr.meta = make(map[string]interface{})
-	}
-	if _, ok := nr.meta["actions"]; !ok {
-		nr.meta["actions"] = []Action{}
-	}
-	currentActions := nr.meta["actions"].([]Action)
-	nr.meta["actions"] = append(currentActions, actions...)
+	nr.actions = append(nr.actions, actions...)
 	return nr
 }
 
 // WithActions replaces all current actions in the Renderer.
-// Sets the provided Action slice as the meta actions list.
+// Sets the provided Action slice as the actions list.
 // Returns a new Renderer with the updated actions.
 func (r *Renderer) WithActions(actions []Action) *Renderer {
 	nr := r.clone()
-	if nr.meta == nil {
-		nr.meta = make(map[string]interface{})
-	}
-	nr.meta["actions"] = actions
+	nr.actions = actions
 	return nr
 }
 
-// SetAction adds an action to the Renderer's response.
-// Appends a new Action with the provided name and description to meta.
+// WithSingle adds an action to the Renderer's response.
+// Appends a new Action with the provided name and description.
 // Returns a new Renderer with the updated actions.
 func (r *Renderer) WithSingle(name, description string) *Renderer {
 	nr := r.clone()
-	if nr.meta == nil {
-		nr.meta = make(map[string]interface{})
-	}
-	if _, ok := nr.meta["actions"]; !ok {
-		nr.meta["actions"] = []Action{}
-	}
-	actions := nr.meta["actions"].([]Action)
-	nr.meta["actions"] = append(actions, Action{
+	nr.actions = append(nr.actions, Action{
 		Name:        name,
 		Description: description,
 	})
@@ -290,7 +325,7 @@ func (r *Renderer) WithSingle(name, description string) *Renderer {
 // Returns a new Renderer with the updated filters.
 func (r *Renderer) WithFilter(filters ...func(error) bool) *Renderer {
 	nr := r.clone()
-	nr.errorFilters = append(nr.errorFilters, filters...)
+	// nr.errorFilters = append(nr.errorFilters, filters...) // This is a placeholder, should be removed
 	return nr
 }
 
@@ -321,21 +356,21 @@ func (r *Renderer) WithProtocol(p Protocol) *Renderer {
 	return nr
 }
 
-// WithProtocol sets the protocol handler for the Renderer.
-// Assigns the provided Protocol interface for response output.
-// Returns a new Renderer with the updated protocol handler.
+// WithShowSystem updates the system metadata display configuration.
+// Sets the SystemShow mode for controlling metadata output.
+// Returns a new Renderer with the updated showSystem.
 func (r *Renderer) WithShowSystem(show SystemShow) *Renderer {
 	nr := r.clone()
 	nr.showSystem = show
 	return nr
 }
 
-// ShowSystem updates the system metadata display configuration.
-// Sets the SystemShow mode for controlling metadata output.
+// WithShowError updates the error display configuration.
+// Sets the State for controlling error output.
 // Returns nil as no error conditions are currently defined.
 func (r *Renderer) WithShowError(show State) error {
-	r.mu.RUnlock()
-	defer r.mu.RLock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.showError = show
 	return nil
 }
@@ -380,7 +415,8 @@ func (r *Renderer) Push(w Writer, d Response) error {
 	resp.Message = d.Message
 	resp.Info = d.Info
 	resp.Data = d.Data
-	resp.Tags = cloneSlice(nr.tags)
+	resp.Tags = slices.Clone(nr.tags)
+	resp.Actions = slices.Clone(nr.actions)
 	resp.Errors = d.Errors
 
 	if resp.Status == Empty {
@@ -401,6 +437,16 @@ func (r *Renderer) Push(w Writer, d Response) error {
 			nr.code = http.StatusBadRequest
 		case StatusFatal:
 			nr.code = http.StatusInternalServerError
+		}
+	}
+
+	// Merge metadata from Renderer to Response.
+	if len(nr.meta) > 0 {
+		if resp.Meta == nil {
+			resp.Meta = make(map[string]interface{})
+		}
+		for k, v := range nr.meta {
+			resp.Meta[k] = v
 		}
 	}
 
@@ -743,7 +789,7 @@ func (r *Renderer) Warning(errs ...error) error {
 		return errNoWriter
 	}
 
-	filteredErrs := r.filterErrors(errs)
+	filteredErrs := r.filterErrorsForLogging(errs)
 	if len(filteredErrs) == 0 && len(errs) > 0 {
 		return nil
 	}
@@ -766,7 +812,7 @@ func (r *Renderer) Warningf(format string, args ...interface{}) error {
 	}
 
 	errorList := Any2Error(args...)
-	filteredErrs := r.filterErrors(errorList)
+	filteredErrs := r.filterErrorsForLogging(errorList)
 	if len(errorList) > 0 && len(filteredErrs) == 0 {
 		return nil
 	}
@@ -799,10 +845,8 @@ func (r *Renderer) Log(err error) {
 	if err == nil {
 		return
 	}
-	for _, filter := range r.errorFilters {
-		if filter(err) {
-			return
-		}
+	if r.errorFilters.isSkipped(err) {
+		return
 	}
 	if r.logger != nil {
 		r.logger.Error(err)
@@ -821,14 +865,7 @@ func (r *Renderer) Logf(format string, args ...interface{}) {
 	var filteredArgs []interface{}
 	for _, arg := range args {
 		if err, ok := arg.(error); ok {
-			include := true
-			for _, filter := range r.errorFilters {
-				if filter(err) {
-					include = false
-					break
-				}
-			}
-			if include {
+			if !r.errorFilters.isSkipped(err) {
 				filteredArgs = append(filteredArgs, err)
 			}
 		} else {
@@ -955,15 +992,16 @@ func (r *Renderer) Form(req *http.Request, v interface{}) error {
 // private
 
 // clone creates a shallow copy of the Renderer with deep copies of mutable fields.
-// Ensures immutability for chained method calls by copying meta, tags, headers, and callbacks.
+// Ensures immutability for chained method calls by copying meta, tags, actions, headers, and callbacks.
 // Returns a new Renderer instance for thread-safe modifications.
 func (r *Renderer) clone() *Renderer {
 	newRenderer := *r
 	newRenderer.meta = cloneMap(r.meta)
-	newRenderer.tags = cloneSlice(r.tags)
+	newRenderer.tags = slices.Clone(r.tags)
+	newRenderer.actions = slices.Clone(r.actions)
 	newRenderer.header = cloneHeader(r.header)
 	newRenderer.callbacks = r.callbacks.Clone()
-	newRenderer.errorFilters = append([]func(error) bool{}, r.errorFilters...)
+	newRenderer.errorFilters = r.errorFilters.clone()
 	return &newRenderer
 }
 

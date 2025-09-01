@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-// Msg sends a successful response with a message.
-// Sends a Response with StatusSuccessful and the provided message.
-// Returns an error if the writer is unset or sending fails.
+// Msg sends a successful HTTP response with a simple message.
+// It constructs a Response with StatusSuccessful and the provided message.
+// Returns an error if the writer is nil or sending the response fails.
 func (r *Renderer) Msg(msg string) error {
 	if r.writer == nil {
 		return errNoWriter
@@ -20,9 +20,36 @@ func (r *Renderer) Msg(msg string) error {
 	})
 }
 
-// Info sends a successful response with a message and info data.
-// Sends a Response with StatusSuccessful, message, and optional info.
-// Returns an error if the writer is unset or sending fails.
+// Msgf sends a successful HTTP response with a formatted message.
+// It formats the message using fmt.Sprintf and constructs a Response with StatusSuccessful.
+// Returns an error if the writer is nil or sending the response fails.
+func (r *Renderer) Msgf(format string, args ...interface{}) error {
+	if r.writer == nil {
+		return errNoWriter
+	}
+	return r.WithStatus(http.StatusOK).Push(r.writer, Response{
+		Status:  StatusSuccessful,
+		Message: fmt.Sprintf(format, args...),
+	})
+}
+
+// Send sends an HTTP response with an unknown status, message, and optional info.
+// It constructs a Response with StatusUnknown, the provided message, and info data.
+// Returns an error if the writer is nil or sending the response fails.
+func (r *Renderer) Send(msg string, info interface{}) error {
+	if r.writer == nil {
+		return errNoWriter
+	}
+	return r.Push(r.writer, Response{
+		Status:  StatusUnknown,
+		Message: msg,
+		Info:    info,
+	})
+}
+
+// Info sends a successful HTTP response with a message and optional info data.
+// It constructs a Response with StatusSuccessful, the provided message, and info.
+// Returns an error if the writer is nil or sending the response fails.
 func (r *Renderer) Info(msg string, info interface{}) error {
 	if r.writer == nil {
 		return errNoWriter
@@ -34,9 +61,9 @@ func (r *Renderer) Info(msg string, info interface{}) error {
 	})
 }
 
-// Data sends a successful response with a message and data items.
-// Sends a Response with StatusSuccessful, message, and data slice.
-// Returns an error if the writer is unset or sending fails.
+// Data sends a successful HTTP response with a message and optional data.
+// It constructs a Response with StatusSuccessful, the provided message, and data.
+// Returns an error if the writer is nil or sending the response fails.
 func (r *Renderer) Data(msg string, data interface{}) error {
 	if r.writer == nil {
 		return errNoWriter
@@ -48,9 +75,9 @@ func (r *Renderer) Data(msg string, data interface{}) error {
 	})
 }
 
-// Response sends a successful response with message, info, and data.
-// Sends a Response with StatusSuccessful, message, info, and data.
-// Returns an error if the writer is unset or sending fails.
+// Response sends a successful HTTP response with a message, optional info, and data.
+// It constructs a Response with StatusSuccessful, the provided message, info, and data.
+// Returns an error if the writer is nil or sending the response fails.
 func (r *Renderer) Response(msg string, info interface{}, data interface{}) error {
 	if r.writer == nil {
 		return errNoWriter
@@ -63,9 +90,9 @@ func (r *Renderer) Response(msg string, info interface{}, data interface{}) erro
 	})
 }
 
-// Unknown sends a pending response with a message and info data.
-// Sends a Response with StatusPending and the provided message/info.
-// Returns an error if the writer is unset or sending fails.
+// Pending sends a pending HTTP response with a message and optional info data.
+// It constructs a Response with StatusPending and HTTP status 202 (Accepted).
+// Returns an error if the writer is nil or sending the response fails.
 func (r *Renderer) Pending(msg string, info interface{}) error {
 	if r.writer == nil {
 		return errNoWriter
@@ -77,9 +104,9 @@ func (r *Renderer) Pending(msg string, info interface{}) error {
 	})
 }
 
-// Titled sends a successful response with a title, message, and info.
-// Sends a Response with StatusSuccessful, title, message, and info.
-// Returns an error if the writer is unset or sending fails.
+// Titled sends a successful HTTP response with a title, message, and optional info.
+// It constructs a Response with StatusSuccessful, the provided title, message, and info.
+// Returns an error if the writer is nil or sending the response fails.
 func (r *Renderer) Titled(title, msg string, info interface{}) error {
 	if r.writer == nil {
 		return errNoWriter
@@ -92,393 +119,257 @@ func (r *Renderer) Titled(title, msg string, info interface{}) error {
 	})
 }
 
-// Error sends an error response with a default summary message.
-// Sends a Response with StatusError and filtered errors, if any.
-// Returns an error if the writer is unset or sending fails; skips if all errors filtered.
+// Error sends an error HTTP response with a default message and optional errors.
+// It constructs a Response with StatusError and filtered errors, if any.
+// Skips sending if all errors are filtered and no custom message is intended.
+// Returns an error if the writer is nil or sending the response fails.
 func (r *Renderer) Error(errs ...error) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-
-	// Logic for non-fatal errors: determine if a response should be skipped.
-	hasNonNilError, containsHidden := checkErrors(errs...)
-	filteredErrs := r.filterErrors(errs)
-
-	// The correct skip condition for Error methods:
-	// Skip if there *was* an error, but all of them were filtered, and none were hidden.
-	if hasNonNilError && len(filteredErrs) == 0 && !containsHidden {
-		return nil
-	}
-
-	resp := getResponse()
-	defer putResponse(resp)
-	resp.Status = StatusError
-	if r.showError.Enabled() {
-		resp.Errors = filteredErrs
-	}
-	resp.Message = defaultErrorMessage
-
-	return r.WithStatus(http.StatusBadRequest).Push(r.writer, *resp)
+	return r.handleErrorResponse(defaultErrorMessage, false, errs...)
 }
 
-// ErrorWith sends an error response with a custom message and errors.
-// Sends a Response with StatusError, custom message, and filtered errors.
-// Returns an error if the writer is unset or sending fails; skips if all errors filtered.
-func (r *Renderer) ErrorWith(message string, errs ...error) error {
-	if r.writer == nil {
-		return errNoWriter
-	}
-
-	hasNonNilError, containsHidden := checkErrors(errs...)
-	filteredErrs := r.filterErrors(errs)
-
-	// The correct skip condition for Error methods.
-	if hasNonNilError && len(filteredErrs) == 0 && !containsHidden {
-		return nil
-	}
-
-	resp := getResponse()
-	defer putResponse(resp)
-	resp.Status = StatusError
-	if r.showError.Enabled() {
-		resp.Errors = filteredErrs
-	}
-	resp.Message = message
-
-	return r.WithStatus(http.StatusBadRequest).Push(r.writer, *resp)
+// ErrorMsg sends an error HTTP response with a custom message and optional errors.
+// It constructs a Response with StatusError, the provided message, and filtered errors.
+// Skips sending if all errors are filtered and no custom message is intended.
+// Returns an error if the writer is nil or sending the response fails.
+func (r *Renderer) ErrorMsg(message string, errs ...error) error {
+	return r.handleErrorResponse(message, false, errs...)
 }
 
-// Errorf sends an error response with a formatted message and errors.
-// Formats the message with provided args, filtering errors for the response.
-// Returns an error if the writer is unset or sending fails; skips if all errors filtered.
+// Errorf sends an error HTTP response with a formatted message and optional errors.
+// It formats the message using fmt.Sprintf, filtering errors for the response.
+// Skips sending if all errors are filtered and no custom message is intended.
+// Returns an error if the writer is nil or sending the response fails.
 func (r *Renderer) Errorf(format string, args ...interface{}) error {
+	message := r.formatWithSpecial(format, args)
+	errs := Any2Error(args...)
+	return r.handleErrorResponse(message, false, errs...)
+}
+
+// Fatal sends a fatal error HTTP response with a default message and optional errors.
+// It constructs a Response with StatusFatal and filtered errors, logging errors if a logger is present.
+// Always sends the response, using HTTP status 500 (Internal Server Error).
+// Returns an error if sending the response fails.
+func (r *Renderer) Fatal(errs ...error) error {
+	return r.handleErrorResponse(defaultFatalMessage, true, errs...)
+}
+
+// FatalMsg sends a fatal error HTTP response with a custom message and optional errors.
+// It constructs a Response with StatusFatal, the provided message, and filtered errors, logging errors if a logger is present.
+// Always sends the response, using HTTP status 500 (Internal Server Error).
+// Returns an error if sending the response fails.
+func (r *Renderer) FatalMsg(message string, errs ...error) error {
+	return r.handleErrorResponse(message, true, errs...)
+}
+
+// Fatalf sends a fatal error HTTP response with a formatted message and optional errors.
+// It formats the message using fmt.Sprintf and constructs a Response with StatusFatal and filtered errors, logging errors if a logger is present.
+// Always sends the response, using HTTP status 500 (Internal Server Error).
+// Returns an error if sending the response fails.
+func (r *Renderer) Fatalf(format string, args ...interface{}) error {
+	message := r.formatWithSpecial(format, args)
+	errs := Any2Error(args...)
+	return r.handleErrorResponse(message, true, errs...)
+}
+
+// handleErrorResponse processes and sends error-related HTTP responses.
+// It handles both fatal and non-fatal errors, applying filters and determining the response status (StatusError or StatusFatal).
+// For fatal responses, it logs errors with additional context if a logger is present.
+// Returns an error if the writer is nil or sending the response fails.
+func (r *Renderer) handleErrorResponse(message string, isInitiallyFatal bool, errs ...error) error {
 	if r.writer == nil {
 		return errNoWriter
 	}
-	allErrorsFromArgs := Any2Error(args...)
 
-	_, containsHidden := checkErrors(allErrorsFromArgs...)
-	jsonErrorList := r.filterErrors(allErrorsFromArgs)
+	responseErrors, fatalErrors, hasHidden := r.processErrors(isInitiallyFatal, errs...)
+	finalErrors := append(responseErrors, fatalErrors...)
+	isEffectivelyFatal := isInitiallyFatal || len(fatalErrors) > 0
 
-	// The correct skip condition for Error methods.
-	if len(allErrorsFromArgs) > 0 && len(jsonErrorList) == 0 && !containsHidden {
+	// Skip non-fatal responses with no errors, no hidden errors, and default or empty message
+	if !isEffectivelyFatal && len(errs) > 0 && len(finalErrors) == 0 && !hasHidden && (message == "" || message == defaultErrorMessage) {
 		return nil
 	}
 
-	verbCount := strings.Count(format, "%") - (strings.Count(format, "%%") * 2)
-	var messageFormatArgs []interface{}
-	argsConsumed := 0
-	for i := 0; i < verbCount && argsConsumed < len(args); {
-		arg := args[argsConsumed]
-		argsConsumed++
-		err, isErr := arg.(error)
-		if !isErr {
-			messageFormatArgs = append(messageFormatArgs, arg)
-			i++
-			continue
-		}
-		isSkippable := false
-		// We use r.isSkippable here only to format the message string correctly,
-		// not to decide whether to skip the entire response.
-		if r.isSkippable(err) {
-			isSkippable = true
-		}
-
-		if errors.Is(err, ErrHidden) {
-			messageFormatArgs = append(messageFormatArgs, "*hidden*")
-		} else if isSkippable {
-			// This is for the message only, don't append the error itself
-		} else {
-			messageFormatArgs = append(messageFormatArgs, err)
-		}
-		i++
-	}
+	// Set response status and message
 	resp := getResponse()
 	defer putResponse(resp)
 	resp.Status = StatusError
+	resp.Message = message
+	if message == "" {
+		resp.Message = defaultErrorMessage
+	}
+	if isEffectivelyFatal {
+		resp.Status = StatusFatal
+		if message == "" || message == defaultErrorMessage {
+			resp.Message = defaultFatalMessage
+		}
+	}
 
+	// Include errors in response if enabled
 	if r.showError.Enabled() {
-		resp.Errors = jsonErrorList
+		resp.Errors = finalErrors
 	}
 
-	format = strings.ReplaceAll(format, "%w", "%v")
-	// Custom formatting to handle missing args due to filtered errors
-	actualFormat := r.formatWithSpecial(format, args)
-	resp.Message = actualFormat
-	return r.WithStatus(http.StatusBadRequest).Push(r.writer, *resp)
-}
+	// Log fatal errors with context
+	if isEffectivelyFatal && r.logger != nil {
+		loggingErrors := r.filterErrorsForLogging(errs)
+		var logErr error
+		logFields := []interface{}{}
+		file, line, funcName := getCallerInfo()
+		logFields = append(logFields, fieldFile, file, fieldLine, line, fieldFunc, funcName)
 
-func (r *Renderer) Fatal(errs ...error) error {
-	message := defaultFatalMessage
-	// 'filtered' is for logging and skip logic ONLY.
-	filtered := r.filterErrors(errs)
-
-	hadSkippable := false
-	hadHidden := false
-	for _, e := range errs {
-		if errors.Is(e, ErrSkip) {
-			hadSkippable = true
+		nilCount := 0
+		for _, err := range errs {
+			if err == nil {
+				nilCount++
+			}
 		}
-		if errors.Is(e, ErrHidden) {
-			hadHidden = true
-		}
-	}
-	if len(filtered) == 0 && hadSkippable && !hadHidden {
-		return nil
-	}
-	var logErr error
-	var logFields []interface{}
-	if len(filtered) > 0 {
-		logErr = filtered[0]
-		logFields = make([]interface{}, len(filtered)-1)
-		for i := 1; i < len(filtered); i++ {
-			logFields[i-1] = filtered[i]
-		}
-	} else {
-		logErr = errors.New(message)
-	}
-	if r.logger != nil {
-		r.logger.Fatal(logErr, logFields...)
-	}
-
-	resp := Response{
-		Status:  StatusFatal,
-		Message: message,
-		Errors:  prepareFatalResponseErrors(errs),
-	}
-
-	if r.showError.Disabled() {
-		resp.Errors = nil
-	}
-	return r.Push(r.writer, resp)
-}
-
-func (r *Renderer) FatalWith(message string, errs ...error) error {
-	if message == "" {
-		message = defaultFatalMessage
-	}
-	filtered := r.filterErrors(errs)
-
-	hadSkippable := false
-	hadHidden := false
-	for _, e := range errs {
-		if errors.Is(e, ErrSkip) {
-			hadSkippable = true
-		}
-		if errors.Is(e, ErrHidden) {
-			hadHidden = true
-		}
-	}
-	if len(filtered) == 0 && hadSkippable && !hadHidden {
-		return nil
-	}
-	var logErr error
-	var logFields []interface{}
-	if len(filtered) > 0 {
-		logErr = filtered[0]
-		logFields = make([]interface{}, len(filtered)-1)
-		for i := 1; i < len(filtered); i++ {
-			logFields[i-1] = filtered[i]
-		}
-	} else {
-		logErr = errors.New(message)
-	}
-	if r.logger != nil {
-		r.logger.Fatal(logErr, logFields...)
-	}
-	resp := Response{
-		Status:  StatusFatal,
-		Message: message,
-		Errors:  prepareFatalResponseErrors(errs),
-	}
-
-	if r.showError.Disabled() {
-		resp.Errors = nil
-	}
-	return r.Push(r.writer, resp)
-}
-
-func (r *Renderer) Fatalf(format string, args ...interface{}) error {
-	var allErrorsFromArgs []error
-	for _, arg := range args {
-		if e, ok := arg.(error); ok {
-			allErrorsFromArgs = append(allErrorsFromArgs, e)
-		}
-	}
-
-	filtered := r.filterErrors(allErrorsFromArgs)
-
-	hadSkippable := false
-	hadHidden := false
-	for _, e := range allErrorsFromArgs {
-		if errors.Is(e, ErrSkip) {
-			hadSkippable = true
-		}
-		if errors.Is(e, ErrHidden) {
-			hadHidden = true
-		}
-	}
-
-	message := r.formatWithSpecial(format, args)
-	if message == "" {
-		message = defaultFatalMessage
-	}
-
-	if len(filtered) == 0 && hadSkippable && !hadHidden {
-		return nil
-	}
-
-	var logErr error
-	var logFields []interface{}
-	if len(filtered) > 0 {
-		logErr = filtered[0]
-		logFields = make([]interface{}, len(filtered)-1)
-		for i := 1; i < len(filtered); i++ {
-			logFields[i-1] = filtered[i]
-		}
-	} else {
-		logErr = errors.New(message)
-	}
-
-	if r.logger != nil {
-		r.logger.Fatal(logErr, logFields...)
-	}
-
-	resp := Response{
-		Status:  StatusFatal,
-		Message: message,
-		Errors:  prepareFatalResponseErrors(allErrorsFromArgs),
-	}
-
-	if r.showError.Disabled() {
-		resp.Errors = nil
-	}
-	return r.Push(r.writer, resp)
-}
-
-func (r *Renderer) formatWithSpecial(format string, args []interface{}) string {
-	var builder strings.Builder
-	i := 0
-	argIndex := 0
-	for i < len(format) {
-		if format[i] != '%' {
-			builder.WriteByte(format[i])
-			i++
-			continue
-		}
-		if i+1 < len(format) && format[i+1] == '%' {
-			builder.WriteByte('%')
-			i += 2
-			continue
-		}
-		// Parse the verb
-		start := i
-		j := i + 1
-		// Flags
-		flags := "#+- 0"
-		for j < len(format) && strings.Contains(flags, string(format[j])) {
-			j++
-		}
-		// Width
-		if j < len(format) && format[j] == '*' {
-			j++
+		filteredCount := len(errs) - len(loggingErrors) - nilCount + nilCount
+		if len(loggingErrors) > 0 {
+			logErr = loggingErrors[0]
+			for i, err := range loggingErrors[1:] {
+				logFields = append(logFields, fmt.Sprintf("error_%d", i+1), err)
+			}
 		} else {
-			for j < len(format) && '0' <= format[j] && format[j] <= '9' {
-				j++
+			logErr = fmt.Errorf("%s (%d errors filtered)", resp.Message, filteredCount)
+		}
+		r.logger.Fatal(logErr, logFields...)
+	}
+
+	// Set HTTP status code
+	statusCode := http.StatusBadRequest
+	if isEffectivelyFatal {
+		statusCode = http.StatusInternalServerError
+	}
+
+	return r.WithStatus(statusCode).Push(r.writer, *resp)
+}
+
+// processErrors filters and categorizes errors for response or logging.
+// It applies error converters, identifies fatal and normal errors, and handles redacted or skipped errors.
+// Returns response-ready errors, fatal errors, and a boolean indicating if any errors were hidden.
+func (r *Renderer) processErrors(isCalledFromFatal bool, errs ...error) (responseErrors, fatalErrors []error, hasHidden bool) {
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+
+		convertedErr := r.errorFilters.applyConverters(err)
+
+		var isFatal bool
+		var fe fatalError
+		var ne normalError
+		if errors.As(convertedErr, &fe) {
+			isFatal = true
+		} else if errors.As(convertedErr, &ne) {
+			isFatal = false
+		} else {
+			isFatal = isCalledFromFatal
+		}
+
+		if r.errorFilters.isSkipped(err) {
+			continue
+		}
+
+		var processedErr error
+		if r.errorFilters.isRedacted(err) {
+			hasHidden = true
+			processedErr = maskedError{original: err}
+		} else {
+			processedErr = errors.Unwrap(convertedErr)
+			if processedErr == nil {
+				processedErr = convertedErr
 			}
 		}
-		// Precision
-		if j < len(format) && format[j] == '.' {
-			j++
-			if j < len(format) && format[j] == '*' {
-				j++
-			} else {
-				for j < len(format) && '0' <= format[j] && format[j] <= '9' {
-					j++
+
+		if isFatal {
+			fatalErrors = append(fatalErrors, processedErr)
+		} else {
+			responseErrors = append(responseErrors, processedErr)
+		}
+	}
+	return
+}
+
+// formatWithSpecial formats a string with arguments, handling errors specially.
+// It filters out skippable errors, redacts hidden errors with "*hidden*", and adjusts format verbs (e.g., %w to %v for errors).
+// Returns the formatted string with processed arguments.
+func (r *Renderer) formatWithSpecial(format string, args []interface{}) string {
+	newFormat := &strings.Builder{}
+	newArgs := []interface{}{}
+	argIdx := 0
+
+	p := 0
+	for p < len(format) {
+		idx := strings.Index(format[p:], "%")
+		if idx == -1 {
+			newFormat.WriteString(format[p:])
+			break
+		}
+		newFormat.WriteString(format[p : p+idx])
+		p += idx
+
+		verbStart := p
+		p++ // move past '%'
+
+		if p < len(format) && format[p] == '%' {
+			newFormat.WriteByte('%')
+			p++
+			continue
+		}
+
+		verbEnd := p
+		for verbEnd < len(format) && strings.ContainsAny(string(format[verbEnd]), "#+- 0123456789.") {
+			verbEnd++
+		}
+		if verbEnd >= len(format) {
+			newFormat.WriteString(format[verbStart:])
+			break
+		}
+		verbEnd++ // include the verb char
+
+		if argIdx < len(args) {
+			arg := args[argIdx]
+			if err, ok := arg.(error); ok {
+				if r.errorFilters.isSkipped(err) {
+					// Skip the format verb and argument
+				} else if r.errorFilters.isRedacted(err) {
+					newFormat.WriteString("%s")
+					newArgs = append(newArgs, "*hidden*")
+				} else {
+					verb := format[verbStart:verbEnd]
+					if verb == "%w" {
+						newFormat.WriteString("%v")
+					} else {
+						newFormat.WriteString(verb)
+					}
+					newArgs = append(newArgs, err)
 				}
+			} else {
+				newFormat.WriteString(format[verbStart:verbEnd])
+				newArgs = append(newArgs, arg)
 			}
+			argIdx++
+		} else {
+			newFormat.WriteString(format[verbStart:verbEnd])
 		}
-		// Verb char
-		if j >= len(format) {
-			builder.WriteString(format[start:])
-			return builder.String()
-		}
-		verbChar := format[j]
-		verb := format[start : j+1]
-		verbLetters := "bcdefgopqstuvwxXEGTU"
-		if !strings.Contains(verbLetters, string(verbChar)) {
-			// Not a valid verb, copy as is
-			builder.WriteString(format[start : j+1])
-			i = j + 1
-			continue
-		}
-		i = j + 1
-		if argIndex >= len(args) {
-			builder.WriteString("%!v(MISSING)")
-			continue
-		}
-		arg := args[argIndex]
-		argIndex++
-		e, isError := arg.(error)
-		if !isError {
-			builder.WriteString(fmt.Sprintf(verb, arg))
-			continue
-		}
-		if r.isSkippable(e) {
-			builder.WriteString("%!v(MISSING)")
-			continue
-		}
-		if errors.Is(e, ErrHidden) {
-			builder.WriteString("*hidden*")
-			continue
-		}
-		if e == nil {
-			builder.WriteString("<nil>")
-			continue
-		}
-		// Normal error
-		builder.WriteString(fmt.Sprintf(verb, e))
+		p = verbEnd
 	}
-	return builder.String()
+
+	return fmt.Sprintf(newFormat.String(), newArgs...)
 }
 
-// Helper to determine if an error is skippable (e.g., for ErrSkip or sql.ErrNoRows).
-// Include any custom filters here.
-func (r *Renderer) isSkippable(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, ErrSkip) {
-		return true
-	}
-	for _, f := range r.errorFilters {
-		if f(err) {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *Renderer) filterErrors(errs []error) []error {
+// filterErrorsForLogging filters errors for logging purposes.
+// It excludes skippable and redacted errors, returning only raw errors suitable for logging.
+func (r *Renderer) filterErrorsForLogging(errs []error) []error {
 	var filtered []error
 	for _, err := range errs {
-		if err == nil || errors.Is(err, ErrHidden) || r.isSkippable(err) {
+		if err == nil {
+			continue
+		}
+		if r.errorFilters.isSkipped(err) || r.errorFilters.isRedacted(err) {
 			continue
 		}
 		filtered = append(filtered, err)
 	}
 	return filtered
-}
-
-func prepareFatalResponseErrors(errs []error) []error {
-	if errs == nil {
-		return nil
-	}
-	responseErrors := make([]error, 0, len(errs))
-	for _, err := range errs {
-		if err != nil && !errors.Is(err, ErrHidden) && !errors.Is(err, ErrSkip) {
-			responseErrors = append(responseErrors, err)
-		}
-	}
-	return responseErrors
 }

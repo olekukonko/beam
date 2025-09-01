@@ -157,6 +157,7 @@ type Action struct {
 	Href        string                 `json:"href,omitempty"`        // URL or URI template
 	Parameters  map[string]interface{} `json:"parameters,omitempty"`  // Required parameters
 	Headers     map[string]string      `json:"headers,omitempty"`     // Required headers
+	Required    bool                   `json:"required,omitempty"`
 }
 
 // ErrorList is a custom type for a list of errors that implements JSON marshalling.
