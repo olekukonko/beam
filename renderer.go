@@ -323,9 +323,12 @@ func (r *Renderer) WithSingle(name, description string) *Renderer {
 // WithFilter adds error filters to the Renderer.
 // Appends the provided error filter functions to errorFilters.
 // Returns a new Renderer with the updated filters.
-func (r *Renderer) WithFilter(filters ...func(error) bool) *Renderer {
+// WithFilter sets the entire ErrorFilterSet for the Renderer.
+// Replaces the current errorFilters with the provided ErrorFilterSet.
+// Returns a new Renderer with the updated error filters.
+func (r *Renderer) WithFilter(efs ErrorFilterSet) *Renderer {
 	nr := r.clone()
-	// nr.errorFilters = append(nr.errorFilters, filters...) // This is a placeholder, should be removed
+	nr.errorFilters = efs
 	return nr
 }
 
@@ -571,6 +574,60 @@ func (r *Renderer) Raw(data interface{}) error {
 	}
 
 	nr.triggerCallbacks(nr.id, StatusSuccessful, "Raw data sent", nil)
+	return nil
+}
+
+// Rest sends raw data as JSON using the Renderer's configuration.
+// Encodes and writes the provided data with headers, forcing JSON content type.
+// Just like Raw but always uses JSON with no additional information.
+// Returns an error if encoding, header application, or writing fails.
+func (r *Renderer) Rest(data interface{}) error {
+	nr := r.clone()
+	nr.contentType = ContentTypeJSON // Force JSON
+	nr.start = time.Now()
+	w := nr.writer
+	if w == nil {
+		return errNoWriter
+	}
+	if nr.generateID.Enabled() && nr.id == Empty {
+		var buf [20]byte
+		n := len(strconv.AppendInt(buf[:0], time.Now().UnixNano(), 10))
+		nr.id = "req-" + string(buf[:n])
+	}
+	if nr.code == 0 {
+		nr.code = http.StatusOK // Default for Rest
+	}
+
+	encoded, err := nr.encoders.Encode(nr.contentType, data)
+	if err != nil {
+		wrapped := errors.Join(errEncodingFailed, err)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		if nr.finalizer != nil {
+			nr.finalizer(w, wrapped)
+		}
+		return wrapped
+	}
+
+	if err := nr.applyCommonHeaders(w, nr.contentType); err != nil {
+		wrapped := errors.Join(errHeaderWriteFailed, err)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		if nr.finalizer != nil {
+			nr.finalizer(w, wrapped)
+		}
+		return wrapped
+	}
+
+	_, err = w.Write(encoded)
+	if err != nil {
+		wrapped := errors.Join(errWriteFailed, err)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		if nr.finalizer != nil {
+			nr.finalizer(w, wrapped)
+		}
+		return wrapped
+	}
+
+	nr.triggerCallbacks(nr.id, StatusSuccessful, "REST data sent", nil)
 	return nil
 }
 
