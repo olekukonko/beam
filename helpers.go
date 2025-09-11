@@ -124,7 +124,7 @@ func (r *Renderer) Titled(title, msg string, info interface{}) error {
 // Skips sending if all errors are filtered and no custom message is intended.
 // Returns an error if the writer is nil or sending the response fails.
 func (r *Renderer) Error(errs ...error) error {
-	return r.handleErrorResponse(defaultErrorMessage, false, errs...)
+	return r.handleErrorResponse(defaultErrorMessage, false, nil, errs...)
 }
 
 // ErrorMsg sends an error HTTP response with a custom message and optional errors.
@@ -132,7 +132,7 @@ func (r *Renderer) Error(errs ...error) error {
 // Skips sending if all errors are filtered and no custom message is intended.
 // Returns an error if the writer is nil or sending the response fails.
 func (r *Renderer) ErrorMsg(message string, errs ...error) error {
-	return r.handleErrorResponse(message, false, errs...)
+	return r.handleErrorResponse(message, false, nil, errs...)
 }
 
 // Errorf sends an error HTTP response with a formatted message and optional errors.
@@ -142,7 +142,15 @@ func (r *Renderer) ErrorMsg(message string, errs ...error) error {
 func (r *Renderer) Errorf(format string, args ...interface{}) error {
 	message := r.formatWithSpecial(format, args)
 	errs := Any2Error(args...)
-	return r.handleErrorResponse(message, false, errs...)
+	return r.handleErrorResponse(message, false, nil, errs...)
+}
+
+// ErrorInfo sends an error HTTP response with a custom message, info data, and optional errors.
+// It constructs a Response with StatusError, the provided message, info, and filtered errors.
+// Skips sending if all errors are filtered and no custom message is intended.
+// Returns an error if the writer is nil or sending the response fails.
+func (r *Renderer) ErrorInfo(message string, info interface{}, errs ...error) error {
+	return r.handleErrorResponse(message, false, info, errs...)
 }
 
 // Fatal sends a fatal error HTTP response with a default message and optional errors.
@@ -150,7 +158,7 @@ func (r *Renderer) Errorf(format string, args ...interface{}) error {
 // Always sends the response, using HTTP status 500 (Internal Server Error).
 // Returns an error if sending the response fails.
 func (r *Renderer) Fatal(errs ...error) error {
-	return r.handleErrorResponse(defaultFatalMessage, true, errs...)
+	return r.handleErrorResponse(defaultFatalMessage, true, nil, errs...)
 }
 
 // FatalMsg sends a fatal error HTTP response with a custom message and optional errors.
@@ -158,7 +166,7 @@ func (r *Renderer) Fatal(errs ...error) error {
 // Always sends the response, using HTTP status 500 (Internal Server Error).
 // Returns an error if sending the response fails.
 func (r *Renderer) FatalMsg(message string, errs ...error) error {
-	return r.handleErrorResponse(message, true, errs...)
+	return r.handleErrorResponse(message, true, nil, errs...)
 }
 
 // Fatalf sends a fatal error HTTP response with a formatted message and optional errors.
@@ -168,14 +176,22 @@ func (r *Renderer) FatalMsg(message string, errs ...error) error {
 func (r *Renderer) Fatalf(format string, args ...interface{}) error {
 	message := r.formatWithSpecial(format, args)
 	errs := Any2Error(args...)
-	return r.handleErrorResponse(message, true, errs...)
+	return r.handleErrorResponse(message, true, nil, errs...)
+}
+
+// FatalInfo sends a fatal error HTTP response with a custom message, info data, and optional errors.
+// It constructs a Response with StatusFatal, the provided message, info, and filtered errors, logging errors if a logger is present.
+// Always sends the response, using HTTP status 500 (Internal Server Error).
+// Returns an error if sending the response fails.
+func (r *Renderer) FatalInfo(message string, info interface{}, errs ...error) error {
+	return r.handleErrorResponse(message, true, info, errs...)
 }
 
 // handleErrorResponse processes and sends error-related HTTP responses.
 // It handles both fatal and non-fatal errors, applying filters and determining the response status (StatusError or StatusFatal).
 // For fatal responses, it logs errors with additional context if a logger is present.
 // Returns an error if the writer is nil or sending the response fails.
-func (r *Renderer) handleErrorResponse(message string, isInitiallyFatal bool, errs ...error) error {
+func (r *Renderer) handleErrorResponse(message string, isInitiallyFatal bool, info interface{}, errs ...error) error {
 	if r.writer == nil {
 		return errNoWriter
 	}
@@ -194,6 +210,7 @@ func (r *Renderer) handleErrorResponse(message string, isInitiallyFatal bool, er
 	defer putResponse(resp)
 	resp.Status = StatusError
 	resp.Message = message
+	resp.Info = info // Set the info field
 	if message == "" {
 		resp.Message = defaultErrorMessage
 	}
