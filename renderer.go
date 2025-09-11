@@ -217,6 +217,22 @@ func (r *Renderer) WithHeader(key, value string) *Renderer {
 	return nr
 }
 
+// WithHeaders adds multiple headers to the Renderer.
+// Adds the provided key-value pairs to the HTTP header map.
+// Expects key-value pairs as variadic arguments (e.g., key1, value1, key2, value2, ...).
+// Returns a new Renderer with the updated headers.
+// Panics if the number of arguments is odd (missing value for a key).
+func (r *Renderer) WithHeaders(kv ...string) *Renderer {
+	if len(kv)%2 != 0 {
+		panic("WithHeaders requires an even number of arguments (key-value pairs)")
+	}
+	nr := r.clone()
+	for i := 0; i < len(kv); i += 2 {
+		nr.header.Add(kv[i], kv[i+1])
+	}
+	return nr
+}
+
 // WithMeta adds metadata to the Renderer.
 // Adds the provided key-value pair to the meta map.
 // Returns a new Renderer with the updated metadata.
@@ -724,6 +740,64 @@ func (r *Renderer) Stream(callback func(*Renderer) (interface{}, error)) error {
 			flusher.Flush()
 		}
 	}
+}
+
+// Relay sends raw data using the Renderer's configured content type, without encoding.
+// Accepts string or []byte as data and writes it directly with headers.
+// Returns an error if data is not string or []byte, or if header application or writing fails.
+func (r *Renderer) Relay(data interface{}) error {
+	nr := r.clone()
+	nr.start = time.Now()
+	w := nr.writer
+	if w == nil {
+		return errNoWriter
+	}
+	if nr.generateID.Enabled() && nr.id == Empty {
+		var buf [20]byte
+		n := len(strconv.AppendInt(buf[:0], time.Now().UnixNano(), 10))
+		nr.id = "req-" + string(buf[:n])
+	}
+	if nr.code == 0 {
+		nr.code = http.StatusOK // Default for Dump
+	}
+
+	var bytesData []byte
+	switch v := data.(type) {
+	case string:
+		bytesData = []byte(v)
+	case []byte:
+		bytesData = v
+	default:
+		err := errors.New("unsupported data type for Dump; must be string or []byte")
+		wrapped := errors.Join(err, errEncodingFailed) // Reuse existing error if appropriate
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		if nr.finalizer != nil {
+			nr.finalizer(w, wrapped)
+		}
+		return wrapped
+	}
+
+	if err := nr.applyCommonHeaders(w, nr.contentType); err != nil {
+		wrapped := errors.Join(errHeaderWriteFailed, err)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		if nr.finalizer != nil {
+			nr.finalizer(w, wrapped)
+		}
+		return wrapped
+	}
+
+	_, err := w.Write(bytesData)
+	if err != nil {
+		wrapped := errors.Join(errWriteFailed, err)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		if nr.finalizer != nil {
+			nr.finalizer(w, wrapped)
+		}
+		return wrapped
+	}
+
+	nr.triggerCallbacks(nr.id, StatusSuccessful, "Dumped data sent", nil)
+	return nil
 }
 
 // Binary sends binary data with the specified content type and headers.
