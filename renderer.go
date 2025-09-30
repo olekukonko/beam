@@ -842,6 +842,48 @@ func (r *Renderer) Binary(contentType string, data []byte) error {
 	return nil
 }
 
+// Pusher sends data from an io.Reader with the specified content type and headers.
+// Streams the provided reader data with appropriate headers.
+// Returns an error if header application or writing fails.
+func (r *Renderer) Pusher(contentType string, data io.Reader) error {
+	nr := r.clone()
+	nr.start = time.Now()
+	w := nr.writer
+	if w == nil {
+		return errNoWriter
+	}
+	if nr.generateID.Enabled() && nr.id == Empty {
+		var buf [20]byte
+		n := len(strconv.AppendInt(buf[:0], time.Now().UnixNano(), 10))
+		nr.id = "req-" + string(buf[:n])
+	}
+	if nr.code == 0 {
+		nr.code = http.StatusOK // Default for Loader
+	}
+
+	if err := nr.applyCommonHeaders(w, contentType); err != nil {
+		wrapped := errors.Join(errHeaderWriteFailed, err)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		if nr.finalizer != nil {
+			nr.finalizer(w, wrapped)
+		}
+		return wrapped
+	}
+
+	_, err := io.Copy(w, data)
+	if err != nil {
+		wrapped := errors.Join(errWriteFailed, err)
+		nr.triggerCallbacks(nr.id, StatusFatal, wrapped.Error(), wrapped)
+		if nr.finalizer != nil {
+			nr.finalizer(w, wrapped)
+		}
+		return wrapped
+	}
+
+	nr.triggerCallbacks(nr.id, StatusSuccessful, "Streamed data sent", nil)
+	return nil
+}
+
 // Image encodes and sends an image with the specified content type.
 // Encodes the provided image.Image (PNG, JPEG, GIF, WebP) and sends as binary data.
 // Returns an error if encoding, header application, or writing fails.

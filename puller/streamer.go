@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
-	"github.com/vmihailenco/msgpack/v5"
 	"io"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Streamer provides efficient streaming operations on an io.Reader.
