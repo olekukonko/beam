@@ -200,17 +200,15 @@ func (r *Renderer) handleErrorResponse(message string, isInitiallyFatal bool, in
 	finalErrors := append(responseErrors, fatalErrors...)
 	isEffectivelyFatal := isInitiallyFatal || len(fatalErrors) > 0
 
-	// Skip non-fatal responses with no errors, no hidden errors, and default or empty message
 	if !isEffectivelyFatal && len(errs) > 0 && len(finalErrors) == 0 && !hasHidden && (message == "" || message == defaultErrorMessage) {
 		return nil
 	}
 
-	// Set response status and message
 	resp := getResponse()
 	defer putResponse(resp)
 	resp.Status = StatusError
 	resp.Message = message
-	resp.Info = info // Set the info field
+	resp.Info = info
 	if message == "" {
 		resp.Message = defaultErrorMessage
 	}
@@ -221,16 +219,28 @@ func (r *Renderer) handleErrorResponse(message string, isInitiallyFatal bool, in
 		}
 	}
 
-	// Include errors in response if enabled
 	if r.showError.Enabled() {
 		resp.Errors = finalErrors
 	}
 
-	// Log fatal errors with context
+	// This is the renderer instance we will use to push the response.
+	finalRenderer := r
+
+	// If an error header key is configured, add the errors to the header.
+	if finalRenderer.errorHeaderKey != "" && len(finalErrors) > 0 {
+
+		var errorStrings []string
+		for _, err := range finalErrors {
+			errorStrings = append(errorStrings, err.Error())
+		}
+		// This respects the immutability pattern by creating a new renderer with the added header.
+		finalRenderer = finalRenderer.WithHeader(finalRenderer.errorHeaderKey, strings.Join(errorStrings, "; "))
+	}
+
 	if isEffectivelyFatal && r.logger != nil {
 		loggingErrors := r.filterErrorsForLogging(errs)
 		var logErr error
-		logFields := []interface{}{}
+		var logFields []interface{}
 		file, line, funcName := getCallerInfo()
 		logFields = append(logFields, fieldFile, file, fieldLine, line, fieldFunc, funcName)
 
@@ -252,13 +262,13 @@ func (r *Renderer) handleErrorResponse(message string, isInitiallyFatal bool, in
 		r.logger.Fatal(logErr, logFields...)
 	}
 
-	// Set HTTP status code
 	statusCode := http.StatusBadRequest
 	if isEffectivelyFatal {
 		statusCode = http.StatusInternalServerError
 	}
 
-	return r.WithStatus(statusCode).Push(r.writer, *resp)
+	// Use the finalRenderer which may contain the new error header.
+	return finalRenderer.WithStatus(statusCode).Push(finalRenderer.writer, *resp)
 }
 
 // processErrors filters and categorizes errors for response or logging.

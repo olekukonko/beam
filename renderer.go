@@ -49,10 +49,10 @@ type Renderer struct {
 	system       System              // System metadata configuration
 	mu           sync.RWMutex
 
-	showSystem SystemShow
-
-	generateID State // Enable automatic ID generation
-	showError  State
+	showSystem     SystemShow
+	errorHeaderKey string
+	generateID     State // Enable automatic ID generation
+	showError      State
 }
 
 // NewRenderer creates a new Renderer with the provided settings and default content type.
@@ -150,6 +150,15 @@ func (r *Renderer) WithConvertFilter(filters ...func(error) error) *Renderer {
 func (r *Renderer) WithLogger(l Logger) *Renderer {
 	nr := r.clone()
 	nr.logger = l
+	return nr
+}
+
+// WithErrorHeader configures the Renderer to write the concatenated error messages
+// to the specified header key during an error response. This is useful for providing
+// error context in responses where a body cannot be read, like a failed WebSocket handshake.
+func (r *Renderer) WithErrorHeader(key string) *Renderer {
+	nr := r.clone()
+	nr.errorHeaderKey = key
 	return nr
 }
 
